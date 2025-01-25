@@ -295,6 +295,57 @@ int read_cluster(FILE* disk, uint32_t cluster) {
     return 0;
 }
 
+// Remove um arquivo do sistema FAT32
+int rm(const char* filename, FILE* disk, Directory* actual_dir) {
+    uint32_t cluster = actual_dir->DIR_FstClusLO;
+    uint32_t data_start = (g_bpb.BPB_RsvdSecCnt + g_bpb.BPB_NumFATs * g_bpb.BPB_FATSz32) * g_bpb.BPB_BytsPerSec;
+    uint32_t cluster_size = g_bpb.BPB_SecPerClus * g_bpb.BPB_BytsPerSec;
+    uint32_t offset = data_start + (cluster - 2) * cluster_size;
+
+    fseek(disk, offset, SEEK_SET);
+    Directory* entries = malloc(cluster_size);
+    fread(entries, cluster_size, 1, disk);
+
+    for (uint32_t i = 0; i < cluster_size / sizeof(Directory); i++) {
+        // Verifica se chegamos no final das entradas do diretório
+        if (entries[i].DIR_Name[0] == 0) {
+            break;
+        }
+        // Ignora entradas inválidas ou deletadas
+        if (entries[i].DIR_Name[0] == 0xE5 || entries[i].DIR_Attr == ATTR_VOLUME_ID) {
+            continue;
+        }
+
+        // Constrói o nome do arquivo sem os espaços
+        char aux[12] = {0};
+        for (int j = 0; j < 11; j++) {
+            if (entries[i].DIR_Name[j] != ' ') {
+                aux[j] = entries[i].DIR_Name[j];
+            } else {
+                break;
+            }
+        }
+
+        // Compara com o nome fornecido
+        if (strcmp(aux, filename) == 0) {
+            // Marca a entrada como deletada
+            entries[i].DIR_Name[0] = 0xE5;
+
+            // Escreve as alterações no disco
+            fseek(disk, offset, SEEK_SET);
+            fwrite(entries, cluster_size, 1, disk);
+
+            printf("Arquivo '%s' removido.\n", filename);
+            free(entries);
+            return 0;
+        }
+    }
+
+    printf("Arquivo '%s' não encontrado.\n", filename);
+    free(entries);
+    return -1;
+}
+
 
 // MAIN
 int main(int argc, char *argv[]) {
@@ -342,6 +393,12 @@ int main(int argc, char *argv[]) {
             else if(verify_attr_command(comando) == 0) {
                 char* name = comando + 5;
                 dir_attr(name, disk);
+            }
+            // rm <file>
+            else if (strncmp(comando, "rm", 2) == 0) {
+                if (rm(comando + 3, disk, &actual_dir) == -1) {
+                    printf("Falha ao remover o arquivo. Certifique-se de que ele existe.\n");
+                }
             }
             // ls
             else if(strcmp(comando, "ls") == 0) {
