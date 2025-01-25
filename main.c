@@ -346,6 +346,86 @@ int rm(const char* filename, FILE* disk, Directory* actual_dir) {
     return -1;
 }
 
+// Remove um diretório vazio do sistema FAT32
+int rmdir(const char* dirname, FILE* disk, Directory* actual_dir) {
+    uint32_t cluster = actual_dir->DIR_FstClusLO;
+    uint32_t data_start = (g_bpb.BPB_RsvdSecCnt + g_bpb.BPB_NumFATs * g_bpb.BPB_FATSz32) * g_bpb.BPB_BytsPerSec;
+    uint32_t cluster_size = g_bpb.BPB_SecPerClus * g_bpb.BPB_BytsPerSec;
+    uint32_t offset = data_start + (cluster - 2) * cluster_size;
+
+    fseek(disk, offset, SEEK_SET);
+    Directory* entries = malloc(cluster_size);
+    fread(entries, cluster_size, 1, disk);
+
+    for (uint32_t i = 0; i < cluster_size / sizeof(Directory); i++) {
+        // Verifica se chegamos no final das entradas do diretório
+        if (entries[i].DIR_Name[0] == 0) {
+            break;
+        }
+        // Ignora entradas inválidas ou deletadas
+        if (entries[i].DIR_Name[0] == 0xE5 || entries[i].DIR_Attr == ATTR_VOLUME_ID) {
+            continue;
+        }
+
+        // Constrói o nome do diretório sem os espaços
+        char aux[12] = {0};
+        for (int j = 0; j < 11; j++) {
+            if (entries[i].DIR_Name[j] != ' ') {
+                aux[j] = entries[i].DIR_Name[j];
+            } else {
+                break;
+            }
+        }
+
+        // Verifica se o nome corresponde ao diretório solicitado
+        if (strcmp(aux, dirname) == 0 && (entries[i].DIR_Attr & ATTR_DIRECTORY)) {
+            // Obtém o cluster do diretório
+            uint32_t dir_cluster = entries[i].DIR_FstClusLO;
+            uint32_t dir_offset = data_start + (dir_cluster - 2) * cluster_size;
+
+            // Lê o conteúdo do diretório
+            fseek(disk, dir_offset, SEEK_SET);
+            Directory* sub_entries = malloc(cluster_size);
+            fread(sub_entries, cluster_size, 1, disk);
+
+            // Verifica se o diretório está vazio
+            int is_empty = 1;
+            for (uint32_t j = 0; j < cluster_size / sizeof(Directory); j++) {
+                if (sub_entries[j].DIR_Name[0] == 0) {
+                    break;
+                }
+                if (sub_entries[j].DIR_Name[0] != 0xE5 && sub_entries[j].DIR_Attr != ATTR_VOLUME_ID) {
+                    is_empty = 0;
+                    break;
+                }
+            }
+            free(sub_entries);
+
+            // Se o diretório não estiver vazio, retorna erro
+            if (!is_empty) {
+                printf("Diretório '%s' não está vazio.\n", dirname);
+                free(entries);
+                return -1;
+            }
+
+            // Marca a entrada como deletada
+            entries[i].DIR_Name[0] = 0xE5;
+
+            // Escreve as alterações no disco
+            fseek(disk, offset, SEEK_SET);
+            fwrite(entries, cluster_size, 1, disk);
+
+            printf("Diretório '%s' removido.\n", dirname);
+            free(entries);
+            return 0;
+        }
+    }
+
+    printf("Diretório '%s' não encontrado.\n", dirname);
+    free(entries);
+    return -1;
+}
+
 
 // MAIN
 int main(int argc, char *argv[]) {
@@ -403,6 +483,12 @@ int main(int argc, char *argv[]) {
             // ls
             else if(strcmp(comando, "ls") == 0) {
                 ls(disk, &actual_dir);
+            }
+            // rmdir <dir>
+            else if (strncmp(comando, "rmdir", 5) == 0) {
+                if (rmdir(comando + 6, disk, &actual_dir) == -1) {
+                    printf("Falha ao remover o diretório. Certifique-se de que ele existe e está vazio.\n");
+                }
             }
             // cd <nome>
             else if(strncmp(comando, "cd", 2) == 0) {
