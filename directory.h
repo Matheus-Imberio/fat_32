@@ -41,4 +41,4 @@ int dir_attr(char* name, FILE* disk);
 int ls(FILE* disk, Directory* dir);
 int cd(const char* name, FILE* disk, Directory* actual_dir);
 int rm(FILE *disk, Directory *dir, const char *filename);
-
+int touch(const char *name, FILE *disk, Directory *actual_cluster);

@@ -22,4 +22,3 @@ typedef struct
 } file_t;
 
 int file_attr(file_t *file);
-int touch(char *name);

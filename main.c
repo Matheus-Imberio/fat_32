@@ -462,7 +462,62 @@ int rm(FILE *disk, Directory *dir, const char *filename)
     free(entries);
     return found ? 0 : -1;
 }
+// Função para criar um arquivo vazio no diretório atual
 
+int touch(const char *name, FILE *disk, Directory *actual_cluster)
+{
+    // Verifica se o nome do arquivo é válido (8.3)
+    if (strlen(name) > 12 || strchr(name, '.') == NULL)
+    {
+        printf("Erro: O nome do arquivo deve estar no formato 8.3.\n");
+        return -1;
+    }
+
+    // Divide o nome em 8.3
+    char name_8_3[11] = {0};
+    memset(name_8_3, ' ', 11);
+    char *dot = strchr(name, '.');
+    int name_len = dot - name;
+    int ext_len = strlen(dot + 1);
+
+    memcpy(name_8_3, name, name_len > 8 ? 8 : name_len);
+    memcpy(name_8_3 + 8, dot + 1, ext_len > 3 ? 3 : ext_len);
+
+    // Calcula informações do diretório atual
+    uint32_t cluster = actual_cluster->DIR_FstClusLO;
+    uint32_t data_start = (g_bpb.BPB_RsvdSecCnt + g_bpb.BPB_NumFATs * g_bpb.BPB_FATSz32) * g_bpb.BPB_BytsPerSec;
+    uint32_t cluster_size = g_bpb.BPB_SecPerClus * g_bpb.BPB_BytsPerSec;
+    uint32_t offset = data_start + (cluster - 2) * cluster_size;
+
+    fseek(disk, offset, SEEK_SET);
+    Directory *entries = malloc(cluster_size);
+    fread(entries, cluster_size, 1, disk);
+
+    // Procura uma entrada vazia no diretório
+    for (uint32_t i = 0; i < cluster_size / sizeof(Directory); i++)
+    {
+        if (entries[i].DIR_Name[0] == 0x00 || entries[i].DIR_Name[0] == 0xE5)
+        {
+            // Preenche a entrada com o nome e atributos
+            memcpy(entries[i].DIR_Name, name_8_3, 11);
+            entries[i].DIR_Attr = 0x20; // Arquivo
+            entries[i].DIR_FstClusHI = 0;
+            entries[i].DIR_FstClusLO = 0;
+            entries[i].DIR_FileSize = 0;
+
+            // Atualiza o diretório no disco
+            fseek(disk, offset, SEEK_SET);
+            fwrite(entries, cluster_size, 1, disk);
+
+            free(entries);
+            return 0;
+        }
+    }
+
+    free(entries);
+    printf("Erro: Não há espaço disponível no diretório.\n");
+    return -1;
+}
 // MAIN
 int main(int argc, char *argv[])
 {
@@ -526,6 +581,21 @@ int main(int argc, char *argv[])
             else if (strcmp(comando, "ls") == 0)
             {
                 ls(disk, &actual_dir);
+            }
+            //touch <filename.file>
+            else if (strncmp(comando, "touch", 5) == 0)
+            {
+                char nomeArquivo[13];
+                sscanf(comando + 6, "%s", nomeArquivo);
+
+                if (touch(nomeArquivo, disk, &actual_dir) == 0)
+                {
+                    printf("Arquivo '%s' criado com sucesso.\n", nomeArquivo);
+                }
+                else
+                {
+                    printf("Erro ao criar o arquivo '%s'.\n", nomeArquivo);
+                }
             }
             // rm <name>
             else if (strncmp(comando, "rm", 2) == 0)
