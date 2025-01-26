@@ -342,52 +342,43 @@ int read_cluster(FILE *disk, uint32_t cluster)
     return 0;
 }
 
-// Função para converter o nome para o formato 8.3
-void convert_to_8dot3(char *name, char *output)
+void convert_to_8dot3(const char *input, char *output)
 {
-    // Limpa a string de saída
     memset(output, ' ', 11);
 
-    // Parte do nome
-    int i = 0;
-    while (name[i] != '.' && name[i] != '\0' && i < 8)
+    int i = 0, j = 0;
+    while (input[i] != '.' && input[i] != '\0' && j < 8)
     {
-        output[i] = toupper(name[i]);
+        output[j++] = toupper((unsigned char)input[i]);
         i++;
     }
 
-    // Parte da extensão
-    if (name[i] == '.')
+    if (input[i] == '.')
     {
         i++;
-        int j = 8;
-        while (name[i] != '\0' && j < 11)
-        {
-            output[j] = toupper(name[i]);
-            i++;
-            j++;
-        }
+    }
+
+    j = 8;
+    while (input[i] != '\0' && j < 11)
+    {
+        output[j++] = toupper((unsigned char)input[i]);
+        i++;
     }
 }
-
-// rm <file>
 int rm(FILE *disk, Directory *dir, const char *filename)
 {
     uint32_t cluster = dir->DIR_FstClusLO;
 
-    // Cálculo do deslocamento inicial no disco
     uint32_t data_start = (g_bpb.BPB_RsvdSecCnt + g_bpb.BPB_NumFATs * g_bpb.BPB_FATSz32) * g_bpb.BPB_BytsPerSec;
     uint32_t cluster_size = g_bpb.BPB_SecPerClus * g_bpb.BPB_BytsPerSec;
     uint32_t offset = data_start + (cluster - 2) * cluster_size;
 
-    // Move para o cluster do diretório
     if (fseek(disk, offset, SEEK_SET) != 0)
     {
         fprintf(stderr, "Erro ao buscar o cluster do diretório no disco.\n");
         return -1;
     }
 
-    // Aloca memória para o diretório
     Directory *entries = malloc(cluster_size);
     if (!entries)
     {
@@ -395,7 +386,6 @@ int rm(FILE *disk, Directory *dir, const char *filename)
         return -1;
     }
 
-    // Lê o diretório no cluster
     if (fread(entries, cluster_size, 1, disk) != 1)
     {
         fprintf(stderr, "Erro ao ler o cluster do diretório.\n");
@@ -403,56 +393,41 @@ int rm(FILE *disk, Directory *dir, const char *filename)
         return -1;
     }
 
-    // Procura pelo arquivo no diretório
     int found = 0;
     for (uint32_t i = 0; i < cluster_size / sizeof(Directory); i++)
     {
         if (entries[i].DIR_Name[0] == 0)
         {
-            break; // Fim do diretório
+            break;
         }
 
-        // Ignora entradas marcadas como excluídas
         if (entries[i].DIR_Name[0] == 0xE5)
         {
             continue;
         }
 
-        // Nome da entrada no formato 8.3
         char entry_name[12] = {0};
         strncpy(entry_name, (const char *)entries[i].DIR_Name, 11);
 
-        // Converte o nome do arquivo para o formato 8.3
         char formatted_name[12] = {0};
         convert_to_8dot3((char *)filename, formatted_name);
 
         if (strncmp(entry_name, formatted_name, 11) == 0)
         {
-            // Marca a entrada como excluída
             entries[i].DIR_Name[0] = 0xE5;
             found = 1;
             break;
         }
     }
 
-    // Grava as alterações de volta no disco
     if (found)
     {
-        if (fseek(disk, offset, SEEK_SET) != 0)
+        if (fseek(disk, offset, SEEK_SET) != 0 || fwrite(entries, cluster_size, 1, disk) != 1)
         {
-            fprintf(stderr, "Erro ao buscar o cluster do diretório para escrita.\n");
+            fprintf(stderr, "Erro ao atualizar o diretório no disco.\n");
             free(entries);
             return -1;
         }
-
-        if (fwrite(entries, cluster_size, 1, disk) != 1)
-        {
-            fprintf(stderr, "Erro ao gravar os dados do diretório no disco.\n");
-            free(entries);
-            return -1;
-        }
-
-        printf("Arquivo '%s' removido com sucesso.\n", filename);
     }
     else
     {
@@ -462,8 +437,8 @@ int rm(FILE *disk, Directory *dir, const char *filename)
     free(entries);
     return found ? 0 : -1;
 }
-// Função para criar um arquivo vazio no diretório atual
 
+// Função para criar um arquivo vazio no diretório atual
 int touch(const char *name, FILE *disk, Directory *actual_cluster)
 {
     // Verifica se o nome do arquivo é válido (8.3)
@@ -582,7 +557,7 @@ int main(int argc, char *argv[])
             {
                 ls(disk, &actual_dir);
             }
-            //touch <filename.file>
+            // touch <filename.file>
             else if (strncmp(comando, "touch", 5) == 0)
             {
                 char nomeArquivo[13];
@@ -607,13 +582,9 @@ int main(int argc, char *argv[])
                 sscanf(comando + 3, "%12s", nomeArquivo); // "rm" ocupa os 2 primeiros caracteres
 
                 // Chama a função rm para excluir o arquivo
-                if (rm(disk, &actual_dir, nomeArquivo) == 0)
+                if (rm(disk, &actual_dir, nomeArquivo) != 0)
                 {
-                    printf("Arquivo '%s' removido com sucesso.\n", nomeArquivo);
-                }
-                else
-                {
-                    printf("Erro ao remover o arquivo '%s'.\n", nomeArquivo);
+                     printf("Erro ao remover o arquivo '%s'.\n", nomeArquivo);
                 }
             }
             // cd <name>
