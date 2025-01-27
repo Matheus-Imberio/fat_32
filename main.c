@@ -4,7 +4,6 @@
 #include <ctype.h>
 #include <stddef.h>
 #include "bpb.h"
-#include "fat.h"
 #include "directory.h"
 
 #define green "\033[0;32m"
@@ -216,44 +215,99 @@ int ls(FILE *disk, Directory *dir)
     uint32_t data_start = (g_bpb.BPB_RsvdSecCnt + g_bpb.BPB_NumFATs * g_bpb.BPB_FATSz32) * g_bpb.BPB_BytsPerSec;
     uint32_t cluster_size = g_bpb.BPB_SecPerClus * g_bpb.BPB_BytsPerSec;
     uint32_t offset = data_start + (cluster - 2) * cluster_size;
+
     fseek(disk, offset, SEEK_SET);
     Directory *entries = malloc(cluster_size);
     fread(entries, cluster_size, 1, disk);
+
     for (uint32_t i = 0; i < cluster_size / sizeof(Directory); i++)
     {
+        // Fim da lista de diretórios
         if (entries[i].DIR_Name[0] == 0)
         {
             break;
         }
-        if (entries[i].DIR_Name[0] == 0xE5)
+
+        // Ignorar entradas removidas e "." ou ".."
+        if (entries[i].DIR_Name[0] == 0xE5 ||
+            (strncmp((const char *)entries[i].DIR_Name, ".          ", 11) == 0) ||
+            (strncmp((const char *)entries[i].DIR_Name, "..         ", 11) == 0))
         {
             continue;
         }
-        if (entries[i].DIR_Attr == ATTR_VOLUME_ID)
+
+        // Ignorar entradas inválidas (sem atributos ou com atributos estranhos)
+        if (!(entries[i].DIR_Attr & (ATTR_ARCHIVE | ATTR_DIRECTORY)))
         {
             continue;
         }
-        if (entries[i].DIR_Attr == ATTR_DIRECTORY)
+
+        // Nome do arquivo/diretório formatado
+        char name[13]; // Nome de arquivo FAT32 é no máximo 12 caracteres + '\0'
+        memset(name, 0, sizeof(name));
+
+        // Copiar o nome básico (primeiros 8 caracteres)
+        strncpy(name, (const char *)entries[i].DIR_Name, 8);
+        // Remover espaços no final do nome básico
+        for (int j = 7; j >= 0; j--)
         {
-            printf(green " %s\n" reset, entries[i].DIR_Name);
-        }
-        else
-        {
-            for (int j = 0; j < 11; j++)
+            if (name[j] == ' ')
             {
-                if (entries[i].DIR_Name[j] == ' ' && entries[i].DIR_Name[j + 1] != ' ')
+                name[j] = '\0';
+            }
+            else
+            {
+                break;
+            }
+        }
+
+        // Adicionar extensão, se existir (caracteres 8 a 11)
+        if (entries[i].DIR_Name[8] != ' ')
+        {
+            strcat(name, ".");
+            strncat(name, (const char *)entries[i].DIR_Name + 8, 3);
+            // Remover espaços no final da extensão
+            for (int j = strlen(name) - 1; j >= 0; j--)
+            {
+                if (name[j] == ' ')
                 {
-                    printf(".");
+                    name[j] = '\0';
                 }
-                else if (entries[i].DIR_Name[j] != ' ')
+                else
                 {
-                    printf("%c", entries[i].DIR_Name[j]);
+                    break;
                 }
             }
         }
-        // printf("Attr: %d\n", entries[i].DIR_Attr);
-        printf(" \n");
+
+        // Validar nome (apenas caracteres ASCII visíveis)
+        int valid = 1;
+        for (size_t j = 0; j < strlen(name); j++)
+        {
+            if (name[j] < 32 || name[j] > 126)
+            {
+                valid = 0;
+                break;
+            }
+        }
+        if (!valid)
+        {
+            continue; // Ignorar entrada com caracteres inválidos
+        }
+
+        // Exibir diretórios em verde
+        if (entries[i].DIR_Attr == ATTR_DIRECTORY)
+        {
+            printf(green " %s\n" reset, name);
+        }
+        else
+        {
+            // Exibir arquivos normais
+            printf(" %s\n", name);
+        }
     }
+
+    free(entries); // Liberação de memória
     return 0;
 }
 
@@ -342,29 +396,7 @@ int read_cluster(FILE *disk, uint32_t cluster)
     return 0;
 }
 
-void convert_to_8dot3(const char *input, char *output)
-{
-    memset(output, ' ', 11);
-
-    int i = 0, j = 0;
-    while (input[i] != '.' && input[i] != '\0' && j < 8)
-    {
-        output[j++] = toupper((unsigned char)input[i]);
-        i++;
-    }
-
-    if (input[i] == '.')
-    {
-        i++;
-    }
-
-    j = 8;
-    while (input[i] != '\0' && j < 11)
-    {
-        output[j++] = toupper((unsigned char)input[i]);
-        i++;
-    }
-}
+// rm
 int rm(FILE *disk, Directory *dir, const char *filename)
 {
     uint32_t cluster = dir->DIR_FstClusLO;
@@ -398,23 +430,18 @@ int rm(FILE *disk, Directory *dir, const char *filename)
     {
         if (entries[i].DIR_Name[0] == 0)
         {
-            break;
+            break; // Fim da lista de entradas
         }
 
         if (entries[i].DIR_Name[0] == 0xE5)
         {
-            continue;
+            continue; // Entrada marcada como excluída
         }
 
-        char entry_name[12] = {0};
-        strncpy(entry_name, (const char *)entries[i].DIR_Name, 11);
-
-        char formatted_name[12] = {0};
-        convert_to_8dot3((char *)filename, formatted_name);
-
-        if (strncmp(entry_name, formatted_name, 11) == 0)
+        // Comparação direta com o nome fornecido
+        if (strncmp((char *)entries[i].DIR_Name, filename, strlen(filename)) == 0)
         {
-            entries[i].DIR_Name[0] = 0xE5;
+            entries[i].DIR_Name[0] = 0xE5; // Marca como excluído
             found = 1;
             break;
         }
@@ -441,22 +468,12 @@ int rm(FILE *disk, Directory *dir, const char *filename)
 // Função para criar um arquivo vazio no diretório atual
 int touch(const char *name, FILE *disk, Directory *actual_cluster)
 {
-    // Verifica se o nome do arquivo é válido (8.3)
-    if (strlen(name) > 12 || strchr(name, '.') == NULL)
+    // Verifica se o nome do arquivo não excede 255 caracteres
+    if (strlen(name) > 255)
     {
-        printf("Erro: O nome do arquivo deve estar no formato 8.3.\n");
+        printf("Erro: O nome do arquivo não pode ter mais de 255 caracteres.\n");
         return -1;
     }
-
-    // Divide o nome em 8.3
-    char name_8_3[11] = {0};
-    memset(name_8_3, ' ', 11);
-    char *dot = strchr(name, '.');
-    int name_len = dot - name;
-    int ext_len = strlen(dot + 1);
-
-    memcpy(name_8_3, name, name_len > 8 ? 8 : name_len);
-    memcpy(name_8_3 + 8, dot + 1, ext_len > 3 ? 3 : ext_len);
 
     // Calcula informações do diretório atual
     uint32_t cluster = actual_cluster->DIR_FstClusLO;
@@ -473,8 +490,11 @@ int touch(const char *name, FILE *disk, Directory *actual_cluster)
     {
         if (entries[i].DIR_Name[0] == 0x00 || entries[i].DIR_Name[0] == 0xE5)
         {
-            // Preenche a entrada com o nome e atributos
-            memcpy(entries[i].DIR_Name, name_8_3, 11);
+            // Preenche a entrada com o nome completo
+            memset(entries[i].DIR_Name, 0, sizeof(entries[i].DIR_Name));
+            strncpy((char *)entries[i].DIR_Name, name, sizeof(entries[i].DIR_Name) - 1);
+
+            // Preenche outros atributos
             entries[i].DIR_Attr = 0x20; // Arquivo
             entries[i].DIR_FstClusHI = 0;
             entries[i].DIR_FstClusLO = 0;
@@ -492,6 +512,31 @@ int touch(const char *name, FILE *disk, Directory *actual_cluster)
     free(entries);
     printf("Erro: Não há espaço disponível no diretório.\n");
     return -1;
+}
+
+// 8.3
+void convert_to_8dot3(const char *input, char *output)
+{
+    memset(output, ' ', 11);
+
+    int i = 0, j = 0;
+    while (input[i] != '.' && input[i] != '\0' && j < 8)
+    {
+        output[j++] = toupper((unsigned char)input[i]);
+        i++;
+    }
+
+    if (input[i] == '.')
+    {
+        i++;
+    }
+
+    j = 8;
+    while (input[i] != '\0' && j < 11)
+    {
+        output[j++] = toupper((unsigned char)input[i]);
+        i++;
+    }
 }
 // MAIN
 int main(int argc, char *argv[])
@@ -563,11 +608,7 @@ int main(int argc, char *argv[])
                 char nomeArquivo[13];
                 sscanf(comando + 6, "%s", nomeArquivo);
 
-                if (touch(nomeArquivo, disk, &actual_dir) == 0)
-                {
-                    printf("Arquivo '%s' criado com sucesso.\n", nomeArquivo);
-                }
-                else
+                if (touch(nomeArquivo, disk, &actual_dir) != 0)
                 {
                     printf("Erro ao criar o arquivo '%s'.\n", nomeArquivo);
                 }
@@ -584,7 +625,7 @@ int main(int argc, char *argv[])
                 // Chama a função rm para excluir o arquivo
                 if (rm(disk, &actual_dir, nomeArquivo) != 0)
                 {
-                     printf("Erro ao remover o arquivo '%s'.\n", nomeArquivo);
+                    printf("Erro ao remover o arquivo '%s'.\n", nomeArquivo);
                 }
             }
             // cd <name>
