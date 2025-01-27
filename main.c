@@ -396,11 +396,30 @@ int read_cluster(FILE *disk, uint32_t cluster)
     return 0;
 }
 
-// rm
+void convert_to_8dot3(const char *input, char *output) {
+    memset(output, ' ', 11);
+
+    int i = 0, j = 0;
+    // Copiar o nome antes do ponto (máximo de 8 caracteres)
+    while (input[i] != '.' && input[i] != '\0' && j < 8) {
+        output[j++] = input[i];
+        i++;
+    }
+
+    // Se houver uma extensão, copiar após o ponto
+    if (input[i] == '.') {
+        i++;
+        j = 8; // Extensão começa na posição 8
+        while (input[i] != '\0' && j < 11) {
+            output[j++] = input[i];
+            i++;
+        }
+    }
+}
+
 int rm(FILE *disk, Directory *dir, const char *filename)
 {
     uint32_t cluster = dir->DIR_FstClusLO;
-
     uint32_t data_start = (g_bpb.BPB_RsvdSecCnt + g_bpb.BPB_NumFATs * g_bpb.BPB_FATSz32) * g_bpb.BPB_BytsPerSec;
     uint32_t cluster_size = g_bpb.BPB_SecPerClus * g_bpb.BPB_BytsPerSec;
     uint32_t offset = data_start + (cluster - 2) * cluster_size;
@@ -426,22 +445,27 @@ int rm(FILE *disk, Directory *dir, const char *filename)
     }
 
     int found = 0;
+    char formatted_name[12] = {0};
+    convert_to_8dot3(filename, formatted_name);
+
     for (uint32_t i = 0; i < cluster_size / sizeof(Directory); i++)
     {
         if (entries[i].DIR_Name[0] == 0)
         {
-            break; // Fim da lista de entradas
+            break;
         }
 
         if (entries[i].DIR_Name[0] == 0xE5)
         {
-            continue; // Entrada marcada como excluída
+            continue;
         }
 
-        // Comparação direta com o nome fornecido
-        if (strncmp((char *)entries[i].DIR_Name, filename, strlen(filename)) == 0)
+        char entry_name[12] = {0};
+        strncpy(entry_name, (const char *)entries[i].DIR_Name, 11);
+
+        if (strncmp(entry_name, formatted_name, 11) == 0)
         {
-            entries[i].DIR_Name[0] = 0xE5; // Marca como excluído
+            entries[i].DIR_Name[0] = 0xE5;
             found = 1;
             break;
         }
@@ -466,11 +490,9 @@ int rm(FILE *disk, Directory *dir, const char *filename)
 }
 
 // Função para criar um arquivo vazio no diretório atual
-int touch(const char *name, FILE *disk, Directory *actual_cluster)
-{
+int touch(const char *name, FILE *disk, Directory *actual_cluster) {
     // Verifica se o nome do arquivo não excede 255 caracteres
-    if (strlen(name) > 255)
-    {
+    if (strlen(name) > 255) {
         printf("Erro: O nome do arquivo não pode ter mais de 255 caracteres.\n");
         return -1;
     }
@@ -486,13 +508,13 @@ int touch(const char *name, FILE *disk, Directory *actual_cluster)
     fread(entries, cluster_size, 1, disk);
 
     // Procura uma entrada vazia no diretório
-    for (uint32_t i = 0; i < cluster_size / sizeof(Directory); i++)
-    {
-        if (entries[i].DIR_Name[0] == 0x00 || entries[i].DIR_Name[0] == 0xE5)
-        {
-            // Preenche a entrada com o nome completo
+    for (uint32_t i = 0; i < cluster_size / sizeof(Directory); i++) {
+        if (entries[i].DIR_Name[0] == 0x00 || entries[i].DIR_Name[0] == 0xE5) {
+            // Preenche a entrada com o nome no formato 8.3
+            char formatted_name[12] = {0};
+            convert_to_8dot3(name, formatted_name);
             memset(entries[i].DIR_Name, 0, sizeof(entries[i].DIR_Name));
-            strncpy((char *)entries[i].DIR_Name, name, sizeof(entries[i].DIR_Name) - 1);
+            strncpy((char *)entries[i].DIR_Name, formatted_name, 11);
 
             // Preenche outros atributos
             entries[i].DIR_Attr = 0x20; // Arquivo
@@ -512,31 +534,6 @@ int touch(const char *name, FILE *disk, Directory *actual_cluster)
     free(entries);
     printf("Erro: Não há espaço disponível no diretório.\n");
     return -1;
-}
-
-// 8.3
-void convert_to_8dot3(const char *input, char *output)
-{
-    memset(output, ' ', 11);
-
-    int i = 0, j = 0;
-    while (input[i] != '.' && input[i] != '\0' && j < 8)
-    {
-        output[j++] = toupper((unsigned char)input[i]);
-        i++;
-    }
-
-    if (input[i] == '.')
-    {
-        i++;
-    }
-
-    j = 8;
-    while (input[i] != '\0' && j < 11)
-    {
-        output[j++] = toupper((unsigned char)input[i]);
-        i++;
-    }
 }
 // MAIN
 int main(int argc, char *argv[])
