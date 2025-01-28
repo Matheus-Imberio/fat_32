@@ -899,7 +899,8 @@ int cp(FILE *disk, Directory *dir, const char *source_name, const char *target_d
     free(target_entries);
     return 0;
 }
-int rename_file(FILE *disk, Directory *dir, const char *file_name, const char *new_name) {
+int rename_file(FILE *disk, Directory *dir, const char *file_name, const char *new_name)
+{
     char formatted_old_name[12] = {0};
     char formatted_new_name[12] = {0};
 
@@ -908,7 +909,8 @@ int rename_file(FILE *disk, Directory *dir, const char *file_name, const char *n
     convert_to_8dot3(new_name, formatted_new_name);
 
     // Verificar se as extensões dos nomes são iguais
-    if (strncmp(formatted_old_name + 8, formatted_new_name + 8, 3) != 0) {
+    if (strncmp(formatted_old_name + 8, formatted_new_name + 8, 3) != 0)
+    {
         fprintf(stderr, "Erro: O novo nome '%s' deve manter a mesma extensão que '%s'.\n", new_name, file_name);
         return -1;
     }
@@ -919,18 +921,21 @@ int rename_file(FILE *disk, Directory *dir, const char *file_name, const char *n
     uint32_t cluster_size = g_bpb.BPB_SecPerClus * g_bpb.BPB_BytsPerSec;
     uint32_t offset = data_start + (cluster - 2) * cluster_size;
 
-    if (fseek(disk, offset, SEEK_SET) != 0) {
+    if (fseek(disk, offset, SEEK_SET) != 0)
+    {
         fprintf(stderr, "Erro ao buscar o cluster do diretório no disco.\n");
         return -1;
     }
 
     Directory *entries = malloc(cluster_size);
-    if (!entries) {
+    if (!entries)
+    {
         fprintf(stderr, "Erro ao alocar memória para o diretório.\n");
         return -1;
     }
 
-    if (fread(entries, cluster_size, 1, disk) != 1) {
+    if (fread(entries, cluster_size, 1, disk) != 1)
+    {
         fprintf(stderr, "Erro ao ler o cluster do diretório.\n");
         free(entries);
         return -1;
@@ -938,19 +943,23 @@ int rename_file(FILE *disk, Directory *dir, const char *file_name, const char *n
 
     int found = 0;
 
-    for (uint32_t i = 0; i < cluster_size / sizeof(Directory); i++) {
-        if (entries[i].DIR_Name[0] == 0) {
+    for (uint32_t i = 0; i < cluster_size / sizeof(Directory); i++)
+    {
+        if (entries[i].DIR_Name[0] == 0)
+        {
             break;
         }
 
-        if (entries[i].DIR_Name[0] == 0xE5) {
+        if (entries[i].DIR_Name[0] == 0xE5)
+        {
             continue;
         }
 
         char entry_name[12] = {0};
         strncpy(entry_name, (const char *)entries[i].DIR_Name, 11);
 
-        if (strncmp(entry_name, formatted_old_name, 11) == 0) {
+        if (strncmp(entry_name, formatted_old_name, 11) == 0)
+        {
             // Encontrou o arquivo, renomear
             memcpy(entries[i].DIR_Name, formatted_new_name, 11);
             found = 1;
@@ -958,16 +967,20 @@ int rename_file(FILE *disk, Directory *dir, const char *file_name, const char *n
         }
     }
 
-    if (found) {
+    if (found)
+    {
         // Escrever as alterações no disco
-        if (fseek(disk, offset, SEEK_SET) != 0 || fwrite(entries, cluster_size, 1, disk) != 1) {
+        if (fseek(disk, offset, SEEK_SET) != 0 || fwrite(entries, cluster_size, 1, disk) != 1)
+        {
             fprintf(stderr, "Erro ao salvar as alterações no disco.\n");
             free(entries);
             return -1;
         }
 
         printf("Arquivo renomeado com sucesso: %s -> %s\n", file_name, new_name);
-    } else {
+    }
+    else
+    {
         fprintf(stderr, "Arquivo '%s' não encontrado.\n", file_name);
     }
 
@@ -1026,8 +1039,9 @@ int main(int argc, char *argv[])
             // pwd
             else if (strcmp(comando, "pwd") == 0)
             {
-                pwd();
+                printf("Diretório atual: %s\n", current_path);
             }
+
             // attr <nome>
             else if (verify_attr_command(comando) == 0)
             {
@@ -1072,37 +1086,46 @@ int main(int argc, char *argv[])
 
                 if (strcmp(comando + 3, ".") == 0)
                 {
+                    // Permanece no mesmo diretório
                     continue;
                 }
                 else if (strcmp(comando + 3, "..") == 0)
                 {
-                    actual_dir = last_dir;
-                    last_dir = aux;
-
-                    // Atualizar o caminho ao voltar para o diretório anterior
-                    char *last_slash = strrchr(current_path, '/');
-                    if (last_slash && last_slash != current_path)
+                    // Voltar para o diretório anterior
+                    if (strcmp(current_path, "/") == 0)
                     {
-                        *last_slash = '\0'; // Remove o último componente do caminho
+                        printf("Já está no diretório raiz.\n");
                     }
-                    else if (last_slash == current_path)
+                    else
                     {
-                        // Caso especial: voltando ao diretório raiz
-                        strcpy(current_path, "/");
+                        actual_dir = last_dir;
+                        last_dir = aux;
+
+                        // Atualizar o caminho para o diretório pai
+                        char *last_slash = strrchr(current_path, '/');
+                        if (last_slash && last_slash != current_path)
+                        {
+                            *last_slash = '\0'; // Remove o último componente do caminho
+                        }
+                        else if (last_slash == current_path)
+                        {
+                            // Caso especial: voltando ao diretório raiz
+                            strcpy(current_path, "/");
+                        }
                     }
                 }
                 else
                 {
-                    // Tentar mudar para o novo diretório
+                    // Tentar mudar para o diretório especificado
                     if (cd(comando + 3, disk, &actual_dir) == -1)
                     {
-                        printf("Diretório não encontrado.\n");
+                        printf("Diretório '%s' não encontrado.\n", comando + 3);
                     }
                     else
                     {
                         last_dir = aux;
 
-                        // Atualizar o caminho ao entrar no novo diretório
+                        // Atualizar o caminho para o novo diretório
                         size_t temp_path_len = strlen(current_path);
                         size_t comando_len = strlen(comando + 3);
 
@@ -1125,6 +1148,7 @@ int main(int argc, char *argv[])
                     }
                 }
             }
+
             // mv<source><target>
             else if (strncmp(comando, "mv", 2) == 0)
             {
