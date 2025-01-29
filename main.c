@@ -314,38 +314,49 @@ int cd(const char *name, FILE *disk, Directory *actual_dir)
     uint32_t data_start = (g_bpb.BPB_RsvdSecCnt + g_bpb.BPB_NumFATs * g_bpb.BPB_FATSz32) * g_bpb.BPB_BytsPerSec;
     uint32_t cluster_size = g_bpb.BPB_SecPerClus * g_bpb.BPB_BytsPerSec;
     uint32_t offset = data_start + (cluster - 2) * cluster_size;
+
     fseek(disk, offset, SEEK_SET);
+
     Directory *entries = malloc(cluster_size);
+    if (!entries)
+    {
+        fprintf(stderr, "Erro: Falha ao alocar memória para leitura do diretório.\n");
+        return -1;
+    }
+
     fread(entries, cluster_size, 1, disk);
+
+    // Convertendo o nome para o formato FAT32 8.3
+    char expected_name[12];
+    convert_to_8dot3(name, expected_name);
+
     for (uint32_t i = 0; i < cluster_size / sizeof(Directory); i++)
     {
         if (entries[i].DIR_Name[0] == 0)
         {
-            break;
+            break; // Diretório vazio, não encontrado
         }
-        if (entries[i].DIR_Name[0] == 0xE5)
+        if (entries[i].DIR_Name[0] == 0xE5 || (entries[i].DIR_Attr & ATTR_VOLUME_ID))
         {
-            continue;
+            continue; // Entrada deletada ou volume ID, ignora
         }
-        if (entries[i].DIR_Attr == ATTR_VOLUME_ID)
+        if (entries[i].DIR_Attr & ATTR_DIRECTORY)
         {
-            continue;
-        }
-        if (entries[i].DIR_Attr == ATTR_DIRECTORY)
-        {
-            char aux[12];
-            for (int j = 0; entries[i].DIR_Name[j] != ' '; j++)
-            {
-                aux[j] = entries[i].DIR_Name[j];
-            }
-            if (strcmp(aux, name) == 0)
+            char aux[12] = {0}; // Garante que o buffer está zerado
+            strncpy(aux, (char *)entries[i].DIR_Name, 11);
+            aux[11] = '\0'; // Termina corretamente a string
+
+            if (strncmp(aux, expected_name, 11) == 0)
             {
                 *actual_dir = entries[i];
+                free(entries);
                 return 0;
             }
         }
     }
-    return -1;
+
+    free(entries);
+    return -1; // Diretório não encontrado
 }
 
 // FAT
@@ -987,6 +998,95 @@ int rename_file(FILE *disk, Directory *dir, const char *file_name, const char *n
     free(entries);
     return found ? 0 : -1;
 }
+// Aloca um cluster vazio na FAT
+int allocate_cluster(FILE *disk, uint32_t *new_cluster)
+{
+    for (uint32_t i = 2; i < g_bpb.BPB_TotSec32 / g_bpb.BPB_SecPerClus; i++)
+    {
+        uint32_t entry;
+        memcpy(&entry, &g_fat[i * 4], 4);
+        if ((entry & 0x0FFFFFFF) == 0)
+        { // Cluster vazio encontrado
+            uint32_t eoc = 0x0FFFFFFF;
+            memcpy(&g_fat[i * 4], &eoc, 4);
+
+            // Atualiza a FAT no disco
+            uint32_t fat_start = g_bpb.BPB_RsvdSecCnt * g_bpb.BPB_BytsPerSec;
+            fseek(disk, fat_start + (i * 4), SEEK_SET);
+            fwrite(&eoc, 4, 1, disk);
+
+            *new_cluster = i;
+            return 0;
+        }
+    }
+    return -1; // Sem espaço livre
+}
+
+// Cria um novo diretório
+int mkdir(const char *name, Directory *parent, FILE *disk)
+{
+    uint32_t new_cluster;
+    if (allocate_cluster(disk, &new_cluster) == -1)
+    {
+        fprintf(stderr, "Erro: Sem espaço para criar um novo diretório.\n");
+        return -1;
+    }
+
+    // Criar a entrada do novo diretório no formato 8.3
+    Directory new_dir = {0};
+    convert_to_8dot3(name, (char *)new_dir.DIR_Name);
+    new_dir.DIR_Attr = ATTR_DIRECTORY;
+    new_dir.DIR_FstClusLO = (uint16_t)(new_cluster & 0xFFFF);
+    new_dir.DIR_FstClusHI = (uint16_t)((new_cluster >> 16) & 0xFFFF);
+
+    // Encontrar espaço livre no diretório pai
+    uint32_t cluster = parent->DIR_FstClusLO;
+    uint32_t offset = cluster_to_offset(cluster);
+    fseek(disk, offset, SEEK_SET);
+
+    // Ajustar número de entradas lidas de acordo com o tamanho do cluster
+    int max_entries = g_bpb.BPB_BytsPerSec * g_bpb.BPB_SecPerClus / sizeof(Directory);
+    Directory *entries = calloc(max_entries, sizeof(Directory));
+
+    fread(entries, sizeof(Directory), max_entries, disk);
+    for (int i = 0; i < max_entries; i++)
+    {
+        if (entries[i].DIR_Name[0] == 0 || entries[i].DIR_Name[0] == 0xE5)
+        {
+            entries[i] = new_dir;
+            fseek(disk, offset + (i * sizeof(Directory)), SEEK_SET);
+            fwrite(&new_dir, sizeof(Directory), 1, disk);
+            break;
+        }
+    }
+    free(entries);
+
+    // Criar o cluster do novo diretório e inicializar as entradas "." e ".."
+    uint32_t cluster_size = g_bpb.BPB_SecPerClus * g_bpb.BPB_BytsPerSec;
+    Directory *buffer = calloc(cluster_size / sizeof(Directory), sizeof(Directory));
+
+    // Entrada "."
+    memcpy(buffer[1].DIR_Name, "..         ", 11);
+    buffer[0].DIR_Name[11] = '\0';
+    buffer[0].DIR_Attr = ATTR_DIRECTORY;
+    buffer[0].DIR_FstClusLO = new_dir.DIR_FstClusLO;
+    buffer[0].DIR_FstClusHI = new_dir.DIR_FstClusHI;
+
+    // Entrada ".."
+
+    memcpy(buffer[1].DIR_Name, "..         ", 11);
+    buffer[1].DIR_Name[11] = '\0';
+    buffer[1].DIR_Attr = ATTR_DIRECTORY;
+    buffer[1].DIR_FstClusLO = parent->DIR_FstClusLO;
+    buffer[1].DIR_FstClusHI = parent->DIR_FstClusHI;
+
+    // Escrever no disco
+    fseek(disk, cluster_to_offset(new_cluster), SEEK_SET);
+    fwrite(buffer, cluster_size, 1, disk);
+    free(buffer);
+
+    return 0;
+}
 
 // MAIN
 int main(int argc, char *argv[])
@@ -1035,6 +1135,19 @@ int main(int argc, char *argv[])
             {
                 uint8_t num = atoi(comando + 8);
                 read_cluster(disk, num);
+            }
+            // MKDIR <nome>
+            else if (strncmp(comando, "mkdir", 5) == 0)
+            {
+                if (strlen(comando) <= 6)
+                {
+                    printf("Erro: Nome do diretório inválido.\n");
+                }
+                else
+                {
+                    char *name = comando + 6;
+                    mkdir(name, &actual_dir, disk);
+                }
             }
             // pwd
             else if (strcmp(comando, "pwd") == 0)
@@ -1202,7 +1315,7 @@ int main(int argc, char *argv[])
             // exit
             else if (strcmp(comando, "exit") == 0)
             {
-                printf("Saindo...\n");
+                printf("Finalizado!\n");
                 break;
             }
         }

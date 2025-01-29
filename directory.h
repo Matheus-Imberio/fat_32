@@ -31,18 +31,6 @@ typedef struct __attribute__((packed))
   uint32_t DIR_FileSize;
 } Directory;
 
-typedef struct {
-    uint8_t LDIR_Ord;          // Ordem da entrada (e último indicador)
-    uint16_t LDIR_Name1[5];    // Primeiros 5 caracteres do nome (unicode)
-    uint8_t LDIR_Attr;         // Atributo (sempre 0x0F para LFN)
-    uint8_t LDIR_Type;         // Tipo (sempre 0x00)
-    uint8_t LDIR_Chksum;       // Checksum do nome 8.3 associado
-    uint16_t LDIR_Name2[6];    // Próximos 6 caracteres do nome (unicode)
-    uint16_t LDIR_FstClusLO;   // Sempre 0 para entradas LFN
-    uint16_t LDIR_Name3[2];    // Últimos 2 caracteres do nome (unicode)
-} LongFileNameEntry;
-
-
 uint8_t* g_fat = NULL;
 
 int read_fat(FILE* disk);
@@ -56,9 +44,11 @@ int read_file(FILE* disk, Directory* file, void* buffer);
 int pwd();
 int dir_attr(char* name, FILE* disk);
 int cd(const char* name, FILE* disk, Directory* actual_dir);
-void create_lfn_entry(const char *name, LongFileNameEntry *lfn_entries, int *index);
 int touch(const char *name, FILE *disk, Directory *actual_cluster);
 int ls(FILE *disk, Directory *dir);
 int mv(FILE *disk, Directory *dir, const char *source_name, const char *target_dir_name);
 int cp(FILE *disk, Directory *dir, const char *source_name, const char *target_dir_name);
 int rename_file(FILE *disk, Directory *dir, const char *file_name, const char *new_name);
+int allocate_cluster(FILE* disk, uint32_t* new_cluster);
+int mkdir(const char* name, Directory* parent, FILE* disk);
+void convert_to_8dot3(const char *input, char *output);
