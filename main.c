@@ -6,6 +6,8 @@
 #include "bpb.h"
 #include "directory.h"
 
+#define ATTR_LONG_NAME 0x0F
+
 #define green "\033[0;32m"
 #define blue "\033[0;34m"
 #define reset "\033[0m"
@@ -206,7 +208,7 @@ int dir_attr(char *name, FILE *disk)
     return -1;
 }
 
-// Exibe os arquivos de um diretório
+// Exibe os arquivos de um diretório com suporte a caracteres acentuados
 int ls(FILE *disk, Directory *dir)
 {
     uint32_t cluster = dir->DIR_FstClusLO;
@@ -218,53 +220,47 @@ int ls(FILE *disk, Directory *dir)
     Directory *entries = malloc(cluster_size);
     fread(entries, cluster_size, 1, disk);
 
+    char lfn_name[256] = "";
     for (uint32_t i = 0; i < cluster_size / sizeof(Directory); i++)
     {
-        // Fim da lista de diretórios
         if (entries[i].DIR_Name[0] == 0)
         {
             break;
         }
 
-        // Ignorar entradas removidas e "." ou ".."
-        if (entries[i].DIR_Name[0] == 0xE5 ||
-            (strncmp((const char *)entries[i].DIR_Name, ".          ", 11) == 0) ||
-            (strncmp((const char *)entries[i].DIR_Name, "..         ", 11) == 0))
+        if (entries[i].DIR_Name[0] == 0xE5 || (strncmp((const char *)entries[i].DIR_Name, ".          ", 11) == 0) || (strncmp((const char *)entries[i].DIR_Name, "..         ", 11) == 0))
         {
             continue;
         }
 
-        // Ignorar entradas inválidas (sem atributos ou com atributos estranhos)
         if (!(entries[i].DIR_Attr & (ATTR_ARCHIVE | ATTR_DIRECTORY)))
         {
             continue;
         }
 
-        // Nome do arquivo/diretório formatado
-        char name[13]; // Nome de arquivo FAT32 é no máximo 12 caracteres + '\0'
-        memset(name, 0, sizeof(name));
-
-        // Copiar o nome básico (primeiros 8 caracteres)
-        strncpy(name, (const char *)entries[i].DIR_Name, 8);
-        // Remover espaços no final do nome básico
-        for (int j = 7; j >= 0; j--)
+        // Se for uma entrada de nome longo, armazenamos o nome
+        if (entries[i].DIR_Attr == ATTR_LONG_NAME)
         {
-            if (name[j] == ' ')
-            {
-                name[j] = '\0';
-            }
-            else
-            {
-                break;
-            }
+            LongDirEntry *lfn_entry = (LongDirEntry *)&entries[i];
+            wchar_t lfn_part[14] = {0};
+            memcpy(lfn_part, lfn_entry->LDIR_Name1, sizeof(lfn_entry->LDIR_Name1));
+            memcpy(lfn_part + 5, lfn_entry->LDIR_Name2, sizeof(lfn_entry->LDIR_Name2));
+            memcpy(lfn_part + 11, lfn_entry->LDIR_Name3, sizeof(lfn_entry->LDIR_Name3));
+            wcstombs(lfn_name, lfn_part, sizeof(lfn_name));
+            continue;
         }
-        // Adicionar extensão, se existir (caracteres 8 a 11)
-        if (entries[i].DIR_Name[8] != ' ')
+
+        // Se não houver nome longo armazenado, usamos o nome curto
+        char name[13] = "";
+        if (lfn_name[0] != '\0')
         {
-            strcat(name, ".");
-            strncat(name, (const char *)entries[i].DIR_Name + 8, 3);
-            // Remover espaços no final da extensão
-            for (int j = strlen(name) - 1; j >= 0; j--)
+            strncpy(name, lfn_name, sizeof(name) - 1);
+            lfn_name[0] = '\0';
+        }
+        else
+        {
+            strncpy(name, (const char *)entries[i].DIR_Name, 8);
+            for (int j = 7; j >= 0; j--)
             {
                 if (name[j] == ' ')
                 {
@@ -275,20 +271,22 @@ int ls(FILE *disk, Directory *dir)
                     break;
                 }
             }
-        }
-        // Validar nome (apenas caracteres ASCII visíveis)
-        int valid = 1;
-        for (size_t j = 0; j < strlen(name); j++)
-        {
-            if (name[j] < 32 || name[j] > 126)
+            if (entries[i].DIR_Name[8] != ' ')
             {
-                valid = 0;
-                break;
+                strcat(name, ".");
+                strncat(name, (const char *)entries[i].DIR_Name + 8, 3);
+                for (int j = strlen(name) - 1; j >= 0; j--)
+                {
+                    if (name[j] == ' ')
+                    {
+                        name[j] = '\0';
+                    }
+                    else
+                    {
+                        break;
+                    }
+                }
             }
-        }
-        if (!valid)
-        {
-            continue; // Ignorar entrada com caracteres inválidos
         }
 
         // Exibir diretórios em verde
@@ -298,65 +296,106 @@ int ls(FILE *disk, Directory *dir)
         }
         else
         {
-            // Exibir arquivos normais
             printf(" %s\n", name);
         }
     }
 
-    free(entries); // Liberação de memória
+    free(entries);
     return 0;
 }
-
-// Muda de diretório, usado para o comando "cd"
-int cd(const char *name, FILE *disk, Directory *actual_dir)
+// Função para mudar de diretório
+int cd(const char *dir_name, FILE *disk, Directory *current_dir)
 {
-    uint32_t cluster = actual_dir->DIR_FstClusLO;
-    uint32_t data_start = (g_bpb.BPB_RsvdSecCnt + g_bpb.BPB_NumFATs * g_bpb.BPB_FATSz32) * g_bpb.BPB_BytsPerSec;
+    uint32_t cluster = current_dir->DIR_FstClusLO | (current_dir->DIR_FstClusHI << 16);
     uint32_t cluster_size = g_bpb.BPB_SecPerClus * g_bpb.BPB_BytsPerSec;
-    uint32_t offset = data_start + (cluster - 2) * cluster_size;
+    uint32_t offset = cluster_to_offset(cluster);
 
-    fseek(disk, offset, SEEK_SET);
-
-    Directory *entries = malloc(cluster_size);
-    if (!entries)
+    if (strcmp(dir_name, "..") == 0)
     {
-        fprintf(stderr, "Erro: Falha ao alocar memória para leitura do diretório.\n");
+        if (cluster == g_bpb.BPB_RootClus)
+        {
+            printf("Já está no diretório raiz.\n");
+            return -1;
+        }
+
+        // Ler a entrada do diretório pai
+        fseek(disk, offset, SEEK_SET);
+        Directory *entries = malloc(cluster_size);
+        fread(entries, cluster_size, 1, disk);
+
+        for (uint32_t i = 0; i < cluster_size / sizeof(Directory); i++)
+        {
+            if (entries[i].DIR_Name[0] == 0) 
+                break;
+
+            if (entries[i].DIR_Attr == ATTR_DIRECTORY && strncmp((char *)entries[i].DIR_Name, "..", 2) == 0)
+            {
+                uint32_t parent_cluster = entries[i].DIR_FstClusLO | (entries[i].DIR_FstClusHI << 16);
+                free(entries);
+
+                // Atualiza a estrutura do diretório atual com o diretório pai
+                offset = cluster_to_offset(parent_cluster);
+                fseek(disk, offset, SEEK_SET);
+                fread(current_dir, sizeof(Directory), 1, disk);
+                return 0;
+            }
+        }
+
+        free(entries);
+        printf("Erro: Diretório pai não encontrado.\n");
         return -1;
     }
 
+    // Ler o diretório atual para encontrar o novo diretório
+    fseek(disk, offset, SEEK_SET);
+    Directory *entries = malloc(cluster_size);
     fread(entries, cluster_size, 1, disk);
-
-    // Convertendo o nome para o formato FAT32 8.3
-    char expected_name[12];
-    convert_to_8dot3(name, expected_name);
 
     for (uint32_t i = 0; i < cluster_size / sizeof(Directory); i++)
     {
         if (entries[i].DIR_Name[0] == 0)
-        {
-            break; // Diretório vazio, não encontrado
-        }
-        if (entries[i].DIR_Name[0] == 0xE5 || (entries[i].DIR_Attr & ATTR_VOLUME_ID))
-        {
-            continue; // Entrada deletada ou volume ID, ignora
-        }
+            break;
+
         if (entries[i].DIR_Attr & ATTR_DIRECTORY)
         {
-            char aux[12] = {0}; // Garante que o buffer está zerado
-            strncpy(aux, (char *)entries[i].DIR_Name, 11);
-            aux[11] = '\0'; // Termina corretamente a string
+            char name[12] = {0};
+            strncpy(name, (const char *)entries[i].DIR_Name, 11);
+            trim_whitespace(name);
 
-            if (strncmp(aux, expected_name, 11) == 0)
+            if (strcmp(name, dir_name) == 0)
             {
-                *actual_dir = entries[i];
+                memcpy(current_dir, &entries[i], sizeof(Directory));
                 free(entries);
                 return 0;
             }
         }
     }
 
+    printf("Diretório '%s' não encontrado.\n", dir_name);
     free(entries);
-    return -1; // Diretório não encontrado
+    return -1;
+}
+// Função para remover espaços em branco do início e do fim de uma string
+void trim_whitespace(char *str)
+{
+    char *end;
+
+    // Remove espaços do início
+    while (isspace((unsigned char)*str))
+        str++;
+
+    if (*str == 0)
+    {
+        return; // Se a string estiver vazia, nada a fazer
+    }
+
+    // Remove espaços do final
+    end = str + strlen(str) - 1;
+    while (end > str && isspace((unsigned char)*end))
+        end--;
+
+    // Adiciona terminador nulo no final da string limpa
+    *(end + 1) = '\0';
 }
 
 // FAT
@@ -1032,19 +1071,16 @@ int mkdir(const char *name, Directory *parent, FILE *disk)
         return -1;
     }
 
-    // Criar a entrada do novo diretório no formato 8.3
     Directory new_dir = {0};
     convert_to_8dot3(name, (char *)new_dir.DIR_Name);
     new_dir.DIR_Attr = ATTR_DIRECTORY;
     new_dir.DIR_FstClusLO = (uint16_t)(new_cluster & 0xFFFF);
     new_dir.DIR_FstClusHI = (uint16_t)((new_cluster >> 16) & 0xFFFF);
 
-    // Encontrar espaço livre no diretório pai
     uint32_t cluster = parent->DIR_FstClusLO;
     uint32_t offset = cluster_to_offset(cluster);
     fseek(disk, offset, SEEK_SET);
 
-    // Ajustar número de entradas lidas de acordo com o tamanho do cluster
     int max_entries = g_bpb.BPB_BytsPerSec * g_bpb.BPB_SecPerClus / sizeof(Directory);
     Directory *entries = calloc(max_entries, sizeof(Directory));
 
@@ -1061,26 +1097,21 @@ int mkdir(const char *name, Directory *parent, FILE *disk)
     }
     free(entries);
 
-    // Criar o cluster do novo diretório e inicializar as entradas "." e ".."
     uint32_t cluster_size = g_bpb.BPB_SecPerClus * g_bpb.BPB_BytsPerSec;
     Directory *buffer = calloc(cluster_size / sizeof(Directory), sizeof(Directory));
 
     // Entrada "."
-    memcpy(buffer[1].DIR_Name, "..         ", 11);
-    buffer[0].DIR_Name[11] = '\0';
+    memcpy(buffer[0].DIR_Name, ".          ", 11);
     buffer[0].DIR_Attr = ATTR_DIRECTORY;
     buffer[0].DIR_FstClusLO = new_dir.DIR_FstClusLO;
     buffer[0].DIR_FstClusHI = new_dir.DIR_FstClusHI;
 
     // Entrada ".."
-
     memcpy(buffer[1].DIR_Name, "..         ", 11);
-    buffer[1].DIR_Name[11] = '\0';
     buffer[1].DIR_Attr = ATTR_DIRECTORY;
     buffer[1].DIR_FstClusLO = parent->DIR_FstClusLO;
     buffer[1].DIR_FstClusHI = parent->DIR_FstClusHI;
 
-    // Escrever no disco
     fseek(disk, cluster_to_offset(new_cluster), SEEK_SET);
     fwrite(buffer, cluster_size, 1, disk);
     free(buffer);
