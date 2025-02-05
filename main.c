@@ -161,51 +161,117 @@ int pwd()
 }
 
 // Exibe os atributos de um diretório
-int dir_attr(char *name, FILE *disk)
-{
+int dir_attr(const char *name, FILE *disk) {
+    if (!name || !disk) {
+        fprintf(stderr, "Erro: Parâmetros inválidos para dir_attr().\n");
+        return -1;
+    }
+
+    // Converter o nome para o formato 8.3
+    char formatted_name[12] = {0};
+    convert_to_8dot3(name, formatted_name);
+
+    // Obter o cluster inicial do diretório atual
     uint32_t cluster = g_RootDirectory.DIR_FstClusLO;
     uint32_t data_start = (g_bpb.BPB_RsvdSecCnt + g_bpb.BPB_NumFATs * g_bpb.BPB_FATSz32) * g_bpb.BPB_BytsPerSec;
     uint32_t cluster_size = g_bpb.BPB_SecPerClus * g_bpb.BPB_BytsPerSec;
     uint32_t offset = data_start + (cluster - 2) * cluster_size;
+
+    // Ler o diretório atual
     fseek(disk, offset, SEEK_SET);
     Directory *entries = malloc(cluster_size);
+    if (!entries) {
+        fprintf(stderr, "Erro: Falha ao alocar memória para leitura do diretório.\n");
+        return -1;
+    }
     fread(entries, cluster_size, 1, disk);
-    for (uint32_t i = 0; i < cluster_size / sizeof(Directory); i++)
-    {
-        if (entries[i].DIR_Name[0] == 0)
-        {
+
+    // Procurar o arquivo ou diretório pelo nome
+    int found = 0;
+    for (uint32_t i = 0; i < cluster_size / sizeof(Directory); i++) {
+        if (entries[i].DIR_Name[0] == 0) {
+            break; // Fim das entradas válidas
+        }
+
+        if (entries[i].DIR_Name[0] == 0xE5) {
+            continue; // Entrada excluída, ignorar
+        }
+
+        char entry_name[12] = {0};
+        strncpy(entry_name, (const char *)entries[i].DIR_Name, 11);
+
+        if (strncmp(entry_name, formatted_name, 11) == 0) {
+            // Arquivo ou diretório encontrado
+            found = 1;
+
+            // Exibir os atributos
+            printf("Nome: %s\n", entry_name);
+            printf("Atributos: ");
+            if (entries[i].DIR_Attr & ATTR_READ_ONLY) printf("Read-Only ");
+            if (entries[i].DIR_Attr & ATTR_HIDDEN) printf("Hidden ");
+            if (entries[i].DIR_Attr & ATTR_SYSTEM) printf("System ");
+            if (entries[i].DIR_Attr & ATTR_VOLUME_ID) printf("Volume ");
+            if (entries[i].DIR_Attr & ATTR_DIRECTORY) printf("Directory ");
+            if (entries[i].DIR_Attr & ATTR_ARCHIVE) printf("Archive ");
+            printf("\n");
+
+            // Decodificar e exibir a data de criação
+            if (entries[i].DIR_CrtDate != 0) {
+                printf("Data de criação: %04d-%02d-%02d\n",
+                       (entries[i].DIR_CrtDate >> 9) + 1980,
+                       (entries[i].DIR_CrtDate >> 5) & 0x0F,
+                       entries[i].DIR_CrtDate & 0x1F);
+            } else {
+                printf("Data de criação: Não disponível\n");
+            }
+
+            // Decodificar e exibir a hora de criação
+            if (entries[i].DIR_CrtTime != 0) {
+                printf("Hora de criação: %02d:%02d:%02d\n",
+                       (entries[i].DIR_CrtTime >> 11),
+                       (entries[i].DIR_CrtTime >> 5) & 0x3F,
+                       (entries[i].DIR_CrtTime & 0x1F) * 2);
+            } else {
+                printf("Hora de criação: Não disponível\n");
+            }
+
+            // Decodificar e exibir a data de última modificação
+            if (entries[i].DIR_WrtDate != 0) {
+                printf("Data de última modificação: %04d-%02d-%02d\n",
+                       (entries[i].DIR_WrtDate >> 9) + 1980,
+                       (entries[i].DIR_WrtDate >> 5) & 0x0F,
+                       entries[i].DIR_WrtDate & 0x1F);
+            } else {
+                printf("Data de última modificação: Não disponível\n");
+            }
+
+            // Decodificar e exibir a hora de última modificação
+            if (entries[i].DIR_WrtTime != 0) {
+                printf("Hora de última modificação: %02d:%02d:%02d\n",
+                       (entries[i].DIR_WrtTime >> 11),
+                       (entries[i].DIR_WrtTime >> 5) & 0x3F,
+                       (entries[i].DIR_WrtTime & 0x1F) * 2);
+            } else {
+                printf("Hora de última modificação: Não disponível\n");
+            }
+
+            // Exibir tamanho do arquivo (se não for diretório)
+            if (!(entries[i].DIR_Attr & ATTR_DIRECTORY)) {
+                printf("Tamanho do arquivo: %u bytes\n", entries[i].DIR_FileSize);
+            } else {
+                printf("Tamanho: Diretório\n");
+            }
+
             break;
         }
-        if (entries[i].DIR_Name[0] == 0xE5)
-        {
-            continue;
-        }
-        if (entries[i].DIR_Attr == ATTR_VOLUME_ID)
-        {
-            continue;
-        }
-        if (entries[i].DIR_Attr == ATTR_DIRECTORY)
-        {
-            char aux[12];
-            for (int j = 0; entries[i].DIR_Name[j] != ' '; j++)
-            {
-                aux[j] = entries[i].DIR_Name[j];
-            }
-            if (strcmp(aux, name) == 0)
-            {
-                printf("Nome: %s\n", entries[i].DIR_Name);
-                printf("Atributos: %d\n", entries[i].DIR_Attr);
-                printf("Data de criação: %d\n", entries[i].DIR_CrtDate);
-                printf("Hora de criação: %d\n", entries[i].DIR_CrtTime);
-                printf("Data de último acesso: %d\n", entries[i].DIR_LstAccDate);
-                printf("Data de último acesso: %d\n", entries[i].DIR_WrtDate);
-                printf("Data de último acesso: %d\n", entries[i].DIR_WrtTime);
-                printf("Tamanho: %d\n", entries[i].DIR_FileSize);
-                return 0;
-            }
-        }
     }
-    return -1;
+
+    if (!found) {
+        printf("Arquivo ou diretório '%s' não encontrado.\n", name);
+    }
+
+    free(entries);
+    return found ? 0 : -1;
 }
 
 // Exibe os arquivos de um diretório com suporte a caracteres acentuados
