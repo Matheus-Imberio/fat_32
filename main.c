@@ -325,7 +325,7 @@ int cd(const char *dir_name, FILE *disk, Directory *current_dir)
 
         for (uint32_t i = 0; i < cluster_size / sizeof(Directory); i++)
         {
-            if (entries[i].DIR_Name[0] == 0) 
+            if (entries[i].DIR_Name[0] == 0)
                 break;
 
             if (entries[i].DIR_Attr == ATTR_DIRECTORY && strncmp((char *)entries[i].DIR_Name, "..", 2) == 0)
@@ -1119,6 +1119,171 @@ int mkdir(const char *name, Directory *parent, FILE *disk)
     return 0;
 }
 
+int find_parent_directory(FILE *disk, Directory *actual_dir, Directory *parent_dir)
+{
+    if (!disk || !actual_dir || !parent_dir)
+    {
+        return -1;
+    }
+
+    uint32_t cluster = actual_dir->DIR_FstClusLO;
+
+    if (cluster == g_bpb.BPB_RootClus)
+    {
+        fprintf(stderr, "Erro: Já está na raiz, não pode subir mais.\n");
+        return -1;
+    }
+
+    uint32_t data_start = (g_bpb.BPB_RsvdSecCnt + g_bpb.BPB_NumFATs * g_bpb.BPB_FATSz32) * g_bpb.BPB_BytsPerSec;
+    uint32_t cluster_size = g_bpb.BPB_SecPerClus * g_bpb.BPB_BytsPerSec;
+    uint32_t offset = data_start + (cluster - 2) * cluster_size;
+
+    fseek(disk, offset, SEEK_SET);
+
+    Directory *entries = malloc(cluster_size);
+    if (!entries)
+    {
+        return -1;
+    }
+
+    fread(entries, cluster_size, 1, disk);
+
+    // O segundo item do diretório sempre é "..", o diretório pai
+    *parent_dir = entries[1];
+
+    free(entries);
+    return 0;
+}
+
+int rmdir(const char *name, Directory *parent, FILE *disk)
+{
+    if (!name || !parent || !disk)
+    {
+        fprintf(stderr, "Erro: Parâmetros inválidos para rmdir().\n");
+        return -1;
+    }
+
+    // Converter o nome para o formato 8.3
+    char expected_name[12] = {0};
+    convert_to_8dot3(name, expected_name);
+
+    // Encontrar o diretório no diretório pai
+    uint32_t cluster = parent->DIR_FstClusLO;
+    uint32_t offset = cluster_to_offset(cluster);
+    fseek(disk, offset, SEEK_SET);
+
+    int max_entries = g_bpb.BPB_BytsPerSec * g_bpb.BPB_SecPerClus / sizeof(Directory);
+    Directory *entries = malloc(max_entries * sizeof(Directory));
+    if (!entries)
+    {
+        fprintf(stderr, "Erro: Falha ao alocar memória para leitura do diretório.\n");
+        return -1;
+    }
+
+    fread(entries, sizeof(Directory), max_entries, disk);
+
+    Directory *dir_to_remove = NULL;
+    int dir_index = -1;
+
+    for (int i = 0; i < max_entries; i++)
+    {
+        if (entries[i].DIR_Name[0] == 0)
+        {
+            break; // Fim das entradas válidas
+        }
+
+        if (entries[i].DIR_Name[0] == 0xE5)
+        {
+            continue; // Entrada deletada, ignorar
+        }
+
+        if (entries[i].DIR_Attr & ATTR_DIRECTORY)
+        {
+            char dir_name[12] = {0};
+            memcpy(dir_name, entries[i].DIR_Name, 11);
+
+            if (strncmp(dir_name, expected_name, 11) == 0)
+            {
+                dir_to_remove = &entries[i];
+                dir_index = i;
+                break;
+            }
+        }
+    }
+
+    if (!dir_to_remove)
+    {
+        fprintf(stderr, "Erro: Diretório '%s' não encontrado.\n", name);
+        free(entries);
+        return -1;
+    }
+
+    // Verificar se o diretório está vazio
+    uint32_t dir_cluster = dir_to_remove->DIR_FstClusLO | (dir_to_remove->DIR_FstClusHI << 16);
+    uint32_t dir_offset = cluster_to_offset(dir_cluster);
+    fseek(disk, dir_offset, SEEK_SET);
+
+    Directory *dir_entries = malloc(g_bpb.BPB_SecPerClus * g_bpb.BPB_BytsPerSec);
+    if (!dir_entries)
+    {
+        fprintf(stderr, "Erro: Falha ao alocar memória para leitura do diretório.\n");
+        free(entries);
+        return -1;
+    }
+
+    fread(dir_entries, sizeof(Directory), g_bpb.BPB_SecPerClus * g_bpb.BPB_BytsPerSec / sizeof(Directory), disk);
+
+    int is_empty = 1;
+    for (unsigned long i = 0; i < g_bpb.BPB_SecPerClus * g_bpb.BPB_BytsPerSec / sizeof(Directory); i++)
+    {
+        if (dir_entries[i].DIR_Name[0] == 0)
+        {
+            break; // Fim das entradas válidas
+        }
+
+        if (dir_entries[i].DIR_Name[0] == 0xE5)
+        {
+            continue; // Entrada deletada, ignorar
+        }
+
+        // Ignorar as entradas "." e ".."
+        if (strncmp((const char *)dir_entries[i].DIR_Name, ".          ", 11) == 0 ||
+            strncmp((const char *)dir_entries[i].DIR_Name, "..         ", 11) == 0)
+        {
+            continue;
+        }
+
+        // Se houver qualquer outra entrada, o diretório não está vazio
+        is_empty = 0;
+        break;
+    }
+
+    if (!is_empty)
+    {
+        fprintf(stderr, "Erro: O diretório '%s' não está vazio.\n", name);
+        free(entries);
+        free(dir_entries);
+        return -1;
+    }
+
+    // Marcar o cluster como livre na FAT
+    uint32_t fat_entry = 0x00000000;
+    uint32_t fat_offset = g_bpb.BPB_RsvdSecCnt * g_bpb.BPB_BytsPerSec + dir_cluster * 4;
+    fseek(disk, fat_offset, SEEK_SET);
+    fwrite(&fat_entry, sizeof(uint32_t), 1, disk);
+
+    // Marcar a entrada do diretório como disponível (0xE5)
+    entries[dir_index].DIR_Name[0] = 0xE5;
+    fseek(disk, offset + (dir_index * sizeof(Directory)), SEEK_SET);
+    fwrite(&entries[dir_index], sizeof(Directory), 1, disk);
+
+    free(entries);
+    free(dir_entries);
+
+    printf("Diretório '%s' removido com sucesso.\n", name);
+    return 0;
+}
+
 // MAIN
 int main(int argc, char *argv[])
 {
@@ -1208,6 +1373,26 @@ int main(int argc, char *argv[])
                     printf("Erro ao criar o arquivo '%s'.\n", nomeArquivo);
                 }
             }
+            // rmdir
+            else if (strncmp(comando, "rmdir", 5) == 0)
+            {
+                if (strlen(comando) <= 6)
+                {
+                    printf("Erro: Nome do diretório inválido.\n");
+                }
+                else
+                {
+                    char *name = comando + 6; // Extrai o nome do diretório após "rmdir "
+                    if (rmdir(name, &actual_dir, disk) == 0)
+                    {
+                        printf("Diretório '%s' removido com sucesso.\n", name);
+                    }
+                    else
+                    {
+                        printf("Erro ao remover o diretório '%s'.\n", name);
+                    }
+                }
+            }
             // rm <name>
             else if (strncmp(comando, "rm", 2) == 0)
             {
@@ -1242,19 +1427,29 @@ int main(int argc, char *argv[])
                     }
                     else
                     {
-                        actual_dir = last_dir;
-                        last_dir = aux;
+                        // Encontrar o diretório pai
+                        Directory parent_dir;
+                        if (find_parent_directory(disk, &actual_dir, &parent_dir) == 0)
+                        {
+                            last_dir = actual_dir;   // Salva o diretório atual como último diretório
+                            actual_dir = parent_dir; // Atualiza o diretório atual para o diretório pai
 
-                        // Atualizar o caminho para o diretório pai
-                        char *last_slash = strrchr(current_path, '/');
-                        if (last_slash && last_slash != current_path)
-                        {
-                            *last_slash = '\0'; // Remove o último componente do caminho
+                            // Atualizar o caminho para o diretório pai
+                            char *last_slash = strrchr(current_path, '/');
+                            if (last_slash && last_slash != current_path)
+                            {
+                                *last_slash = '\0'; // Remove o último componente do caminho
+                            }
+                            else if (last_slash == current_path)
+                            {
+                                // Caso especial: voltando ao diretório raiz
+                                strcpy(current_path, "/");
+                                actual_dir = g_RootDirectory; // Restaura o diretório atual para o diretório raiz
+                            }
                         }
-                        else if (last_slash == current_path)
+                        else
                         {
-                            // Caso especial: voltando ao diretório raiz
-                            strcpy(current_path, "/");
+                            printf("Erro: Não foi possível encontrar o diretório pai.\n");
                         }
                     }
                 }

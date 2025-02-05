@@ -65,3 +65,5 @@ int allocate_cluster(FILE *disk, uint32_t *new_cluster);
 int mkdir(const char *name, Directory *parent, FILE *disk);
 void convert_to_8dot3(const char *input, char *output);
 void trim_whitespace(char *str);
+int rmdir(const char *name, Directory *parent, FILE *disk);
+int find_parent_directory(FILE *disk, Directory *actual_dir, Directory *parent_dir);
