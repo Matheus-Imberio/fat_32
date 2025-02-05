@@ -1279,8 +1279,6 @@ int rmdir(const char *name, Directory *parent, FILE *disk)
 
     free(entries);
     free(dir_entries);
-
-    printf("Diretório '%s' removido com sucesso.\n", name);
     return 0;
 }
 
@@ -1307,6 +1305,7 @@ int main(int argc, char *argv[])
     read_root_directory(disk);
     Directory actual_dir = g_RootDirectory;
     Directory last_dir = g_RootDirectory;
+    (void) last_dir;
 
     char comando[100];
     char current_path[256] = "/"; // Caminho inicial
@@ -1385,7 +1384,6 @@ int main(int argc, char *argv[])
                     char *name = comando + 6; // Extrai o nome do diretório após "rmdir "
                     if (rmdir(name, &actual_dir, disk) == 0)
                     {
-                        printf("Diretório '%s' removido com sucesso.\n", name);
                     }
                     else
                     {
