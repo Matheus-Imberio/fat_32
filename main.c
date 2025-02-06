@@ -163,8 +163,10 @@ int pwd()
 }
 
 // Exibe os atributos de um diretório
-int dir_attr(const char *name, FILE *disk) {
-    if (!name || !disk) {
+int dir_attr(const char *name, FILE *disk)
+{
+    if (!name || !disk)
+    {
         fprintf(stderr, "Erro: Parâmetros inválidos para dir_attr().\n");
         return -1;
     }
@@ -182,7 +184,8 @@ int dir_attr(const char *name, FILE *disk) {
     // Ler o diretório atual
     fseek(disk, offset, SEEK_SET);
     Directory *entries = malloc(cluster_size);
-    if (!entries) {
+    if (!entries)
+    {
         fprintf(stderr, "Erro: Falha ao alocar memória para leitura do diretório.\n");
         return -1;
     }
@@ -190,77 +193,102 @@ int dir_attr(const char *name, FILE *disk) {
 
     // Procurar o arquivo ou diretório pelo nome
     int found = 0;
-    for (uint32_t i = 0; i < cluster_size / sizeof(Directory); i++) {
-        if (entries[i].DIR_Name[0] == 0) {
+    for (uint32_t i = 0; i < cluster_size / sizeof(Directory); i++)
+    {
+        if (entries[i].DIR_Name[0] == 0)
+        {
             break; // Fim das entradas válidas
         }
 
-        if (entries[i].DIR_Name[0] == 0xE5) {
+        if (entries[i].DIR_Name[0] == 0xE5)
+        {
             continue; // Entrada excluída, ignorar
         }
 
         char entry_name[12] = {0};
         strncpy(entry_name, (const char *)entries[i].DIR_Name, 11);
 
-        if (strncmp(entry_name, formatted_name, 11) == 0) {
+        if (strncmp(entry_name, formatted_name, 11) == 0)
+        {
             // Arquivo ou diretório encontrado
             found = 1;
 
             // Exibir os atributos
             printf("Nome: %s\n", entry_name);
             printf("Atributos: ");
-            if (entries[i].DIR_Attr & ATTR_READ_ONLY) printf("Read-Only ");
-            if (entries[i].DIR_Attr & ATTR_HIDDEN) printf("Hidden ");
-            if (entries[i].DIR_Attr & ATTR_SYSTEM) printf("System ");
-            if (entries[i].DIR_Attr & ATTR_VOLUME_ID) printf("Volume ");
-            if (entries[i].DIR_Attr & ATTR_DIRECTORY) printf("Directory ");
-            if (entries[i].DIR_Attr & ATTR_ARCHIVE) printf("Archive ");
+            if (entries[i].DIR_Attr & ATTR_READ_ONLY)
+                printf("Read-Only ");
+            if (entries[i].DIR_Attr & ATTR_HIDDEN)
+                printf("Hidden ");
+            if (entries[i].DIR_Attr & ATTR_SYSTEM)
+                printf("System ");
+            if (entries[i].DIR_Attr & ATTR_VOLUME_ID)
+                printf("Volume ");
+            if (entries[i].DIR_Attr & ATTR_DIRECTORY)
+                printf("Directory ");
+            if (entries[i].DIR_Attr & ATTR_ARCHIVE)
+                printf("Archive ");
             printf("\n");
 
             // Decodificar e exibir a data de criação
-            if (entries[i].DIR_CrtDate != 0) {
+            if (entries[i].DIR_CrtDate != 0)
+            {
                 printf("Data de criação: %04d-%02d-%02d\n",
                        (entries[i].DIR_CrtDate >> 9) + 1980,
                        (entries[i].DIR_CrtDate >> 5) & 0x0F,
                        entries[i].DIR_CrtDate & 0x1F);
-            } else {
+            }
+            else
+            {
                 printf("Data de criação: Não disponível\n");
             }
 
             // Decodificar e exibir a hora de criação
-            if (entries[i].DIR_CrtTime != 0) {
+            if (entries[i].DIR_CrtTime != 0)
+            {
                 printf("Hora de criação: %02d:%02d:%02d\n",
                        (entries[i].DIR_CrtTime >> 11),
                        (entries[i].DIR_CrtTime >> 5) & 0x3F,
                        (entries[i].DIR_CrtTime & 0x1F) * 2);
-            } else {
+            }
+            else
+            {
                 printf("Hora de criação: Não disponível\n");
             }
 
             // Decodificar e exibir a data de última modificação
-            if (entries[i].DIR_WrtDate != 0) {
+            if (entries[i].DIR_WrtDate != 0)
+            {
                 printf("Data de última modificação: %04d-%02d-%02d\n",
                        (entries[i].DIR_WrtDate >> 9) + 1980,
                        (entries[i].DIR_WrtDate >> 5) & 0x0F,
                        entries[i].DIR_WrtDate & 0x1F);
-            } else {
+            }
+            else
+            {
                 printf("Data de última modificação: Não disponível\n");
             }
 
             // Decodificar e exibir a hora de última modificação
-            if (entries[i].DIR_WrtTime != 0) {
+            if (entries[i].DIR_WrtTime != 0)
+            {
                 printf("Hora de última modificação: %02d:%02d:%02d\n",
                        (entries[i].DIR_WrtTime >> 11),
                        (entries[i].DIR_WrtTime >> 5) & 0x3F,
                        (entries[i].DIR_WrtTime & 0x1F) * 2);
-            } else {
+            }
+            else
+            {
                 printf("Hora de última modificação: Não disponível\n");
             }
 
             // Exibir tamanho do arquivo (se não for diretório)
-            if (!(entries[i].DIR_Attr & ATTR_DIRECTORY)) {
+            if (!(entries[i].DIR_Attr & ATTR_DIRECTORY))
+            {
                 printf("Tamanho do arquivo: %u bytes\n", entries[i].DIR_FileSize);
-            } else {
+            }
+            else
+            {
                 printf("Tamanho: Diretório\n");
             }
 
@@ -268,7 +296,8 @@ int dir_attr(const char *name, FILE *disk) {
         }
     }
 
-    if (!found) {
+    if (!found)
+    {
         printf("Arquivo ou diretório '%s' não encontrado.\n", name);
     }
 
@@ -635,20 +664,31 @@ void normalizar_nome_dir(char *destino, const char *origem)
     }
 }
 // Função para criar um arquivo vazio no diretório atual
+// Função para criar um arquivo vazio no diretório atual
 int touch(const char *name, FILE *disk, Directory *actual_cluster)
 {
+    // Verifica se o nome do arquivo tem uma extensão
+    if (strchr(name, '.') == NULL)
+    {
+        printf("Erro: O arquivo '%s' deve ter uma extensão.\n", name);
+        return -1;
+    }
+
+    // Verifica se o nome do arquivo é muito longo
     if (strlen(name) > 255)
     {
         printf("Erro: O nome do arquivo não pode ter mais de 255 caracteres.\n");
         return -1;
     }
 
+    // Verifica se o arquivo já existe
     if (nome_existe(name, disk, actual_cluster))
     {
         printf("Erro: O arquivo '%s' já existe.\n", name);
         return -1;
     }
 
+    // Encontra uma entrada vazia no diretório atual
     uint32_t cluster = actual_cluster->DIR_FstClusLO;
     uint32_t offset = cluster_to_offset(cluster);
     fseek(disk, offset, SEEK_SET);
@@ -657,28 +697,32 @@ int touch(const char *name, FILE *disk, Directory *actual_cluster)
     Directory *entries = malloc(max_entries * sizeof(Directory));
     fread(entries, sizeof(Directory), max_entries, disk);
 
+    // Normaliza o nome do arquivo para o formato FAT32 (8.3)
     char formatted_name[12] = {0};
     normalizar_nome(formatted_name, name);
 
+    // Procura uma entrada vazia para criar o arquivo
     for (int i = 0; i < max_entries; i++)
     {
         if (entries[i].DIR_Name[0] == 0x00 || entries[i].DIR_Name[0] == 0xE5)
         {
             memset(entries[i].DIR_Name, 0, sizeof(entries[i].DIR_Name));
             strncpy((char *)entries[i].DIR_Name, formatted_name, 11);
-            entries[i].DIR_Attr = 0x20;
+            entries[i].DIR_Attr = 0x20; // Atributo de arquivo
             entries[i].DIR_FstClusHI = 0;
             entries[i].DIR_FstClusLO = 0;
             entries[i].DIR_FileSize = 0;
 
+            // Escreve a entrada atualizada no disco
             fseek(disk, offset, SEEK_SET);
             fwrite(entries, sizeof(Directory), max_entries, disk);
 
             free(entries);
-            return 0;
+            return 0; // Sucesso
         }
     }
 
+    // Se não houver espaço no diretório
     free(entries);
     printf("Erro: Não há espaço disponível no diretório.\n");
     return -1;
