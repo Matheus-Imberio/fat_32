@@ -67,3 +67,7 @@ void convert_to_8dot3(const char *input, char *output);
 void trim_whitespace(char *str);
 int rmdir(const char *name, Directory *parent, FILE *disk);
 int find_parent_directory(FILE *disk, Directory *actual_dir, Directory *parent_dir);
+int nome_existe(const char *name, FILE *disk, Directory *actual_cluster);
+void normalizar_nome(char *destino, const char *origem);
+int nome_existe_mkdir(const char *name, FILE *disk, Directory *actual_cluster);
+void normalizar_nome_dir(char *destino, const char *origem);

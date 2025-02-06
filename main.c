@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include "bpb.h"
 #include "directory.h"
+#include <wchar.h>
+#include <locale.h>
 
 #define ATTR_LONG_NAME 0x0F
 
@@ -515,6 +517,13 @@ int rm(FILE *disk, Directory *dir, const char *filename)
 
         if (strncmp(entry_name, formatted_name, 11) == 0)
         {
+            // Verifica se é um arquivo e não um diretório
+            if (entries[i].DIR_Attr & ATTR_DIRECTORY)
+            {
+                free(entries);
+                return -2; // Código de erro para "é um diretório"
+            }
+
             entries[i].DIR_Name[0] = 0xE5;
             found = 1;
             break;
@@ -530,54 +539,74 @@ int rm(FILE *disk, Directory *dir, const char *filename)
             return -1;
         }
     }
-    else
-    {
-        printf("Arquivo '%s' não encontrado.\n", filename);
-    }
 
     free(entries);
-    return found ? 0 : -1;
+    return found ? 0 : -1; // 0 para sucesso, -1 para arquivo não encontrado
+}
+void normalizar_nome_dir(char *destino, const char *origem)
+{
+    memset(destino, ' ', 11); // Preenche com espaços
+    destino[11] = '\0';       // Terminador nulo
+
+    int i = 0, j = 0;
+    // Copiar o nome antes do ponto (máximo de 8 caracteres)
+    while (origem[i] != '.' && origem[i] != '\0' && j < 8)
+    {
+        destino[j++] = toupper((unsigned char)origem[i]); // Converte para maiúsculas
+        i++;
+    }
+
+    // Se houver uma extensão, copiar após o ponto
+    if (origem[i] == '.')
+    {
+        i++;
+        j = 8; // Extensão começa na posição 8
+        while (origem[i] != '\0' && j < 11)
+        {
+            destino[j++] = toupper((unsigned char)origem[i]); // Converte para maiúsculas
+            i++;
+        }
+    }
 }
 // Função para criar um arquivo vazio no diretório atual
 int touch(const char *name, FILE *disk, Directory *actual_cluster)
 {
-    // Verifica se o nome do arquivo não excede 255 caracteres
     if (strlen(name) > 255)
     {
         printf("Erro: O nome do arquivo não pode ter mais de 255 caracteres.\n");
         return -1;
     }
 
-    // Calcula informações do diretório atual
+    if (nome_existe(name, disk, actual_cluster))
+    {
+        printf("Erro: O arquivo '%s' já existe.\n", name);
+        return -1;
+    }
+
     uint32_t cluster = actual_cluster->DIR_FstClusLO;
-    uint32_t data_start = (g_bpb.BPB_RsvdSecCnt + g_bpb.BPB_NumFATs * g_bpb.BPB_FATSz32) * g_bpb.BPB_BytsPerSec;
-    uint32_t cluster_size = g_bpb.BPB_SecPerClus * g_bpb.BPB_BytsPerSec;
-    uint32_t offset = data_start + (cluster - 2) * cluster_size;
-
+    uint32_t offset = cluster_to_offset(cluster);
     fseek(disk, offset, SEEK_SET);
-    Directory *entries = malloc(cluster_size);
-    fread(entries, cluster_size, 1, disk);
 
-    // Procura uma entrada vazia no diretório
-    for (uint32_t i = 0; i < cluster_size / sizeof(Directory); i++)
+    int max_entries = g_bpb.BPB_BytsPerSec * g_bpb.BPB_SecPerClus / sizeof(Directory);
+    Directory *entries = malloc(max_entries * sizeof(Directory));
+    fread(entries, sizeof(Directory), max_entries, disk);
+
+    char formatted_name[12] = {0};
+    normalizar_nome(formatted_name, name);
+
+    for (int i = 0; i < max_entries; i++)
     {
         if (entries[i].DIR_Name[0] == 0x00 || entries[i].DIR_Name[0] == 0xE5)
         {
-            // Preenche a entrada com o nome no formato 8.3
-            char formatted_name[12] = {0};
-            convert_to_8dot3(name, formatted_name);
             memset(entries[i].DIR_Name, 0, sizeof(entries[i].DIR_Name));
             strncpy((char *)entries[i].DIR_Name, formatted_name, 11);
-
-            // Preenche outros atributos
-            entries[i].DIR_Attr = 0x20; // Arquivo
+            entries[i].DIR_Attr = 0x20;
             entries[i].DIR_FstClusHI = 0;
             entries[i].DIR_FstClusLO = 0;
             entries[i].DIR_FileSize = 0;
 
-            // Atualiza o diretório no disco
             fseek(disk, offset, SEEK_SET);
-            fwrite(entries, cluster_size, 1, disk);
+            fwrite(entries, sizeof(Directory), max_entries, disk);
 
             free(entries);
             return 0;
@@ -588,6 +617,7 @@ int touch(const char *name, FILE *disk, Directory *actual_cluster)
     printf("Erro: Não há espaço disponível no diretório.\n");
     return -1;
 }
+
 // Directory *find_directory(FILE *disk, const char *dir_name) {
 //     uint32_t cluster = g_RootDirectory.DIR_FstClusLO; // Começar da raiz
 //     uint32_t data_start = (g_bpb.BPB_RsvdSecCnt + g_bpb.BPB_NumFATs * g_bpb.BPB_FATSz32) * g_bpb.BPB_BytsPerSec;
@@ -1061,30 +1091,102 @@ int allocate_cluster(FILE *disk, uint32_t *new_cluster)
     return -1; // Sem espaço livre
 }
 
-// Cria um novo diretório
+// Função para verificar se um nome já existe no diretório
+int nome_existe_mkdir(const char *name, FILE *disk, Directory *actual_cluster)
+{
+    uint32_t cluster = actual_cluster->DIR_FstClusLO;
+    uint32_t offset = cluster_to_offset(cluster);
+    fseek(disk, offset, SEEK_SET);
+
+    int max_entries = g_bpb.BPB_BytsPerSec * g_bpb.BPB_SecPerClus / sizeof(Directory);
+    Directory *entries = malloc(max_entries * sizeof(Directory));
+    fread(entries, sizeof(Directory), max_entries, disk);
+
+    char nome_normalizado[12] = {0};
+    normalizar_nome_dir(nome_normalizado, name);
+
+    for (int i = 0; i < max_entries; i++)
+    {
+        if (entries[i].DIR_Name[0] == 0)
+            break; // Não há mais entradas válidas
+
+        // Ignora entradas excluídas ou especiais
+        if (entries[i].DIR_Name[0] == 0xE5 || (strncmp((const char *)entries[i].DIR_Name, ".          ", 11) == 0) || (strncmp((const char *)entries[i].DIR_Name, "..         ", 11) == 0))
+        {
+            continue;
+        }
+
+        // Verifica se o nome já existe (arquivo ou diretório)
+        char nome_existente[12] = {0};
+        strncpy(nome_existente, (const char *)entries[i].DIR_Name, 11);
+        nome_existente[11] = '\0'; // Garante terminador nulo
+
+        // Comparação case insensitive para nomes curtos (8.3)
+        if (strncasecmp(nome_existente, nome_normalizado, 11) == 0)
+        {
+            free(entries);
+            return 1; // Já existe
+        }
+    }
+
+    free(entries);
+    return 0; // Não encontrado
+}
+
+// Função para criar um novo diretório
 int mkdir(const char *name, Directory *parent, FILE *disk)
 {
-    uint32_t new_cluster;
-    if (allocate_cluster(disk, &new_cluster) == -1)
+    // Verifica se o diretório já existe
+    if (nome_existe_mkdir(name, disk, parent))
     {
-        fprintf(stderr, "Erro: Sem espaço para criar um novo diretório.\n");
+        printf("Erro: O diretório '%s' já existe.\n", name);
+        fflush(stdout);
         return -1;
     }
 
-    Directory new_dir = {0};
-    convert_to_8dot3(name, (char *)new_dir.DIR_Name);
-    new_dir.DIR_Attr = ATTR_DIRECTORY;
-    new_dir.DIR_FstClusLO = (uint16_t)(new_cluster & 0xFFFF);
-    new_dir.DIR_FstClusHI = (uint16_t)((new_cluster >> 16) & 0xFFFF);
-
+    // Verifica se há espaço no diretório atual
     uint32_t cluster = parent->DIR_FstClusLO;
     uint32_t offset = cluster_to_offset(cluster);
     fseek(disk, offset, SEEK_SET);
 
     int max_entries = g_bpb.BPB_BytsPerSec * g_bpb.BPB_SecPerClus / sizeof(Directory);
-    Directory *entries = calloc(max_entries, sizeof(Directory));
-
+    Directory *entries = malloc(max_entries * sizeof(Directory));
     fread(entries, sizeof(Directory), max_entries, disk);
+
+    int found_empty = 0;
+    for (int i = 0; i < max_entries; i++)
+    {
+        if (entries[i].DIR_Name[0] == 0 || entries[i].DIR_Name[0] == 0xE5)
+        {
+            found_empty = 1;
+            break;
+        }
+    }
+
+    if (!found_empty)
+    {
+        printf("Erro: O diretório atual está cheio. Não é possível criar '%s'.\n", name);
+        free(entries);
+        return -1;
+    }
+
+    // Aloca um novo cluster para o diretório
+    uint32_t new_cluster;
+    if (allocate_cluster(disk, &new_cluster) == -1)
+    {
+        fprintf(stderr, "Erro: Sem espaço para criar um novo diretório.\n");
+        free(entries);
+        return -1;
+    }
+
+    // Prepara a nova entrada de diretório
+    Directory new_dir = {0};
+    normalizar_nome((char *)new_dir.DIR_Name, name);
+    new_dir.DIR_Attr = ATTR_DIRECTORY;
+    new_dir.DIR_FstClusLO = (uint16_t)(new_cluster & 0xFFFF);
+    new_dir.DIR_FstClusHI = (uint16_t)((new_cluster >> 16) & 0xFFFF);
+
+    // Encontra uma entrada vazia para armazenar o novo diretório
     for (int i = 0; i < max_entries; i++)
     {
         if (entries[i].DIR_Name[0] == 0 || entries[i].DIR_Name[0] == 0xE5)
@@ -1095,18 +1197,18 @@ int mkdir(const char *name, Directory *parent, FILE *disk)
             break;
         }
     }
+
     free(entries);
 
+    // Cria as entradas padrão "." e ".."
     uint32_t cluster_size = g_bpb.BPB_SecPerClus * g_bpb.BPB_BytsPerSec;
     Directory *buffer = calloc(cluster_size / sizeof(Directory), sizeof(Directory));
 
-    // Entrada "."
     memcpy(buffer[0].DIR_Name, ".          ", 11);
     buffer[0].DIR_Attr = ATTR_DIRECTORY;
     buffer[0].DIR_FstClusLO = new_dir.DIR_FstClusLO;
     buffer[0].DIR_FstClusHI = new_dir.DIR_FstClusHI;
 
-    // Entrada ".."
     memcpy(buffer[1].DIR_Name, "..         ", 11);
     buffer[1].DIR_Attr = ATTR_DIRECTORY;
     buffer[1].DIR_FstClusLO = parent->DIR_FstClusLO;
@@ -1117,6 +1219,77 @@ int mkdir(const char *name, Directory *parent, FILE *disk)
     free(buffer);
 
     return 0;
+}
+// Função para normalizar um nome FAT32 (formato 8.3)
+void normalizar_nome(char *destino, const char *origem)
+{
+    memset(destino, 0, 12);
+    convert_to_8dot3(origem, destino); // Converte para formato FAT32
+}
+
+// Verifica se um nome já existe no diretório atual
+int nome_existe(const char *name, FILE *disk, Directory *actual_cluster)
+{
+    uint32_t cluster = actual_cluster->DIR_FstClusLO;
+    uint32_t offset = cluster_to_offset(cluster);
+    fseek(disk, offset, SEEK_SET);
+
+    int max_entries = g_bpb.BPB_BytsPerSec * g_bpb.BPB_SecPerClus / sizeof(Directory);
+    Directory *entries = malloc(max_entries * sizeof(Directory));
+    fread(entries, sizeof(Directory), max_entries, disk);
+
+    char nome_normalizado[12] = {0};
+    normalizar_nome(nome_normalizado, name);
+
+    for (int i = 0; i < max_entries; i++)
+    {
+        if (entries[i].DIR_Name[0] == 0)
+            break; // Não há mais entradas válidas
+
+        // Ignora entradas excluídas ou especiais
+        if (entries[i].DIR_Name[0] == 0xE5 || (strncmp((const char *)entries[i].DIR_Name, ".          ", 11) == 0) || (strncmp((const char *)entries[i].DIR_Name, "..         ", 11) == 0))
+        {
+            continue;
+        }
+
+        // Verifica se é uma entrada de nome longo (LFN)
+        if (entries[i].DIR_Attr == ATTR_LONG_NAME)
+        {
+            LongDirEntry *lfn_entry = (LongDirEntry *)&entries[i];
+            wchar_t lfn_part[14] = {0};
+            memcpy(lfn_part, lfn_entry->LDIR_Name1, sizeof(lfn_entry->LDIR_Name1));
+            memcpy(lfn_part + 5, lfn_entry->LDIR_Name2, sizeof(lfn_entry->LDIR_Name2));
+            memcpy(lfn_part + 11, lfn_entry->LDIR_Name3, sizeof(lfn_entry->LDIR_Name3));
+
+            char lfn_name[256] = {0};
+            setlocale(LC_ALL, "en_US.UTF-8");
+            wcstombs(lfn_name, lfn_part, sizeof(lfn_name));
+
+            // Comparação exata para nomes longos
+            if (strcmp(lfn_name, name) == 0)
+            {
+                free(entries);
+                return 1; // Já existe
+            }
+        }
+        else
+        {
+            // Verifica se é uma entrada de nome curto (8.3)
+            char nome_existente[12] = {0};
+            strncpy(nome_existente, (const char *)entries[i].DIR_Name, 11);
+            trim_whitespace(nome_existente);
+
+            // Comparação case sensitive para nomes curtos (8.3)
+            if (strcmp(nome_existente, nome_normalizado) == 0)
+            {
+                free(entries);
+                return 1; // Já existe
+            }
+        }
+    }
+
+    free(entries);
+    return 0; // Não encontrado
 }
 
 int find_parent_directory(FILE *disk, Directory *actual_dir, Directory *parent_dir)
@@ -1305,7 +1478,7 @@ int main(int argc, char *argv[])
     read_root_directory(disk);
     Directory actual_dir = g_RootDirectory;
     Directory last_dir = g_RootDirectory;
-    (void) last_dir;
+    (void)last_dir;
 
     char comando[100];
     char current_path[256] = "/"; // Caminho inicial
@@ -1341,7 +1514,14 @@ int main(int argc, char *argv[])
                 else
                 {
                     char *name = comando + 6;
-                    mkdir(name, &actual_dir, disk);
+                    if (nome_existe_mkdir(name, disk, &actual_dir))
+                    {
+                        printf("Erro: O diretório '%s' já existe.\n", name);
+                    }
+                    else
+                    {
+                        mkdir(name, &actual_dir, disk);
+                    }
                 }
             }
             // pwd
@@ -1401,7 +1581,17 @@ int main(int argc, char *argv[])
                 sscanf(comando + 3, "%12s", nomeArquivo); // "rm" ocupa os 2 primeiros caracteres
 
                 // Chama a função rm para excluir o arquivo
-                if (rm(disk, &actual_dir, nomeArquivo) != 0)
+                int resultado = rm(disk, &actual_dir, nomeArquivo);
+
+                if (resultado == -2)
+                {
+                    printf("Erro: '%s' é um diretório e não pode ser removido com rm.\n", nomeArquivo);
+                }
+                else if (resultado == -1)
+                {
+                    printf("Erro: Arquivo '%s' não encontrado.\n", nomeArquivo);
+                }
+                else if (resultado != 0)
                 {
                     printf("Erro ao remover o arquivo '%s'.\n", nomeArquivo);
                 }
