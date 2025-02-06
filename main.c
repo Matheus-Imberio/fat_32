@@ -684,8 +684,7 @@ int touch(const char *name, FILE *disk, Directory *actual_cluster)
     // Verifica se o arquivo já existe
     if (nome_existe(name, disk, actual_cluster))
     {
-        printf("Erro: O arquivo '%s' já existe.\n", name);
-        return -1;
+        return -2;
     }
 
     // Encontra uma entrada vazia no diretório atual
@@ -1657,9 +1656,9 @@ int main(int argc, char *argv[])
                 char nomeArquivo[13];
                 sscanf(comando + 6, "%s", nomeArquivo);
 
-                if (touch(nomeArquivo, disk, &actual_dir) != 0)
+                if (touch(nomeArquivo, disk, &actual_dir) == -2)
                 {
-                    printf("Erro ao criar o arquivo '%s'.\n", nomeArquivo);
+                    printf(" Erro: O arquivo '%s' já existe.\n", nomeArquivo);
                 }
             }
             // rmdir
