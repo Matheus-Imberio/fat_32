@@ -54,7 +54,7 @@ int read_root_directory(FILE *disk);
 Directory *find_file(const char *name);
 int read_file(FILE *disk, Directory *file, void *buffer);
 int pwd();
-int dir_attr(const char *name, FILE *disk);
+int dir_attr(const char *name, FILE *disk, Directory *parent);
 int cd(const char *name, FILE *disk, Directory *actual_dir);
 int touch(const char *name, FILE *disk, Directory *actual_cluster);
 int ls(FILE *disk, Directory *dir);

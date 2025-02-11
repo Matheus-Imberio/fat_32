@@ -7,6 +7,7 @@
 #include "directory.h"
 #include <wchar.h>
 #include <locale.h>
+#include <time.h>
 
 #define ATTR_LONG_NAME 0x0F
 
@@ -161,11 +162,60 @@ int pwd()
     printf("Diretório atual: %s\n", g_RootDirectory.DIR_Name);
     return 0;
 }
-
-// Exibe os atributos de um diretório
-int dir_attr(const char *name, FILE *disk)
+// Função para formatar o nome do arquivo/diretório
+void formatar_nome(char *nome_formatado, const uint8_t *nome_fat32)
 {
-    if (!name || !disk)
+    char nome[9] = {0};     // Nome do arquivo (8 caracteres)
+    char extensao[4] = {0}; // Extensão do arquivo (3 caracteres)
+
+    // Extrai o nome (primeiros 8 caracteres)
+    strncpy(nome, (const char *)nome_fat32, 8);
+    nome[8] = '\0';
+
+    // Remove espaços extras do nome
+    for (int i = 7; i >= 0; i--)
+    {
+        if (nome[i] == ' ')
+        {
+            nome[i] = '\0';
+        }
+        else
+        {
+            break;
+        }
+    }
+
+    // Extrai a extensão (últimos 3 caracteres)
+    strncpy(extensao, (const char *)nome_fat32 + 8, 3);
+    extensao[3] = '\0';
+
+    // Remove espaços extras da extensão
+    for (int i = 2; i >= 0; i--)
+    {
+        if (extensao[i] == ' ')
+        {
+            extensao[i] = '\0';
+        }
+        else
+        {
+            break;
+        }
+    }
+
+    // Combina nome e extensão com um ponto
+    if (extensao[0] != '\0')
+    {
+        sprintf(nome_formatado, "%s.%s", nome, extensao);
+    }
+    else
+    {
+        strcpy(nome_formatado, nome);
+    }
+}
+// Exibe os atributos de um arquivo ou diretório
+int dir_attr(const char *name, FILE *disk, Directory *parent)
+{
+    if (!name || !disk || !parent)
     {
         fprintf(stderr, "Erro: Parâmetros inválidos para dir_attr().\n");
         return -1;
@@ -173,10 +223,10 @@ int dir_attr(const char *name, FILE *disk)
 
     // Converter o nome para o formato 8.3
     char formatted_name[12] = {0};
-    convert_to_8dot3(name, formatted_name);
+    normalizar_nome(formatted_name, name);
 
     // Obter o cluster inicial do diretório atual
-    uint32_t cluster = g_RootDirectory.DIR_FstClusLO;
+    uint32_t cluster = parent->DIR_FstClusLO;
     uint32_t data_start = (g_bpb.BPB_RsvdSecCnt + g_bpb.BPB_NumFATs * g_bpb.BPB_FATSz32) * g_bpb.BPB_BytsPerSec;
     uint32_t cluster_size = g_bpb.BPB_SecPerClus * g_bpb.BPB_BytsPerSec;
     uint32_t offset = data_start + (cluster - 2) * cluster_size;
@@ -213,22 +263,22 @@ int dir_attr(const char *name, FILE *disk)
             // Arquivo ou diretório encontrado
             found = 1;
 
+            // Formata o nome para exibição
+            char nome_formatado[13] = {0}; // 8 (nome) + 1 (ponto) + 3 (extensão) + 1 (null)
+            formatar_nome(nome_formatado, entries[i].DIR_Name);
+
+            // Exibir o nome do arquivo/diretório
+            printf("Nome do arquivo: %s\n", nome_formatado);
+
             // Exibir os atributos
-            printf("Nome: %s\n", entry_name);
-            printf("Atributos: ");
-            if (entries[i].DIR_Attr & ATTR_READ_ONLY)
-                printf("Read-Only ");
-            if (entries[i].DIR_Attr & ATTR_HIDDEN)
-                printf("Hidden ");
-            if (entries[i].DIR_Attr & ATTR_SYSTEM)
-                printf("System ");
-            if (entries[i].DIR_Attr & ATTR_VOLUME_ID)
-                printf("Volume ");
             if (entries[i].DIR_Attr & ATTR_DIRECTORY)
-                printf("Directory ");
-            if (entries[i].DIR_Attr & ATTR_ARCHIVE)
-                printf("Archive ");
-            printf("\n");
+            {
+                printf("Atributos: Diretorio\n");
+            }
+            else
+            {
+                printf("Atributos: Arquivo\n");
+            }
 
             // Decodificar e exibir a data de criação
             if (entries[i].DIR_CrtDate != 0)
@@ -285,11 +335,11 @@ int dir_attr(const char *name, FILE *disk)
             // Exibir tamanho do arquivo (se não for diretório)
             if (!(entries[i].DIR_Attr & ATTR_DIRECTORY))
             {
-                printf("Tamanho do arquivo: %u bytes\n", entries[i].DIR_FileSize);
+                printf("Tamanho do arquivo: %u bytes%s\n", entries[i].DIR_FileSize, entries[i].DIR_FileSize == 0 ? " (vazio)" : "");
             }
             else
             {
-                printf("Tamanho: Diretório\n");
+                printf("Tamanho: N/A (Diretório)\n");
             }
 
             break;
@@ -304,7 +354,6 @@ int dir_attr(const char *name, FILE *disk)
     free(entries);
     return found ? 0 : -1;
 }
-
 // Exibe os arquivos de um diretório com suporte a caracteres acentuados
 int ls(FILE *disk, Directory *dir)
 {
@@ -664,7 +713,6 @@ void normalizar_nome_dir(char *destino, const char *origem)
     }
 }
 // Função para criar um arquivo vazio no diretório atual
-// Função para criar um arquivo vazio no diretório atual
 int touch(const char *name, FILE *disk, Directory *actual_cluster)
 {
     // Verifica se o nome do arquivo tem uma extensão
@@ -708,6 +756,16 @@ int touch(const char *name, FILE *disk, Directory *actual_cluster)
             memset(entries[i].DIR_Name, 0, sizeof(entries[i].DIR_Name));
             strncpy((char *)entries[i].DIR_Name, formatted_name, 11);
             entries[i].DIR_Attr = 0x20; // Atributo de arquivo
+
+            // Preenche as datas e horas de criação/modificação
+            time_t now = time(NULL);
+            struct tm *tm_info = localtime(&now);
+
+            entries[i].DIR_CrtDate = ((tm_info->tm_year - 80) << 9) | ((tm_info->tm_mon + 1) << 5) | tm_info->tm_mday;
+            entries[i].DIR_CrtTime = (tm_info->tm_hour << 11) | (tm_info->tm_min << 5) | (tm_info->tm_sec / 2);
+            entries[i].DIR_WrtDate = entries[i].DIR_CrtDate; // Data de modificação é a mesma da criação
+            entries[i].DIR_WrtTime = entries[i].DIR_CrtTime; // Hora de modificação é a mesma da criação
+
             entries[i].DIR_FstClusHI = 0;
             entries[i].DIR_FstClusLO = 0;
             entries[i].DIR_FileSize = 0;
@@ -1292,6 +1350,16 @@ int mkdir(const char *name, Directory *parent, FILE *disk)
     Directory new_dir = {0};
     normalizar_nome((char *)new_dir.DIR_Name, name);
     new_dir.DIR_Attr = ATTR_DIRECTORY;
+
+    // Preenche as datas e horas de criação/modificação
+    time_t now = time(NULL);
+    struct tm *tm_info = localtime(&now);
+
+    new_dir.DIR_CrtDate = ((tm_info->tm_year - 80) << 9) | ((tm_info->tm_mon + 1) << 5) | tm_info->tm_mday;
+    new_dir.DIR_CrtTime = (tm_info->tm_hour << 11) | (tm_info->tm_min << 5) | (tm_info->tm_sec / 2);
+    new_dir.DIR_WrtDate = new_dir.DIR_CrtDate; // Data de modificação é a mesma da criação
+    new_dir.DIR_WrtTime = new_dir.DIR_CrtTime; // Hora de modificação é a mesma da criação
+
     new_dir.DIR_FstClusLO = (uint16_t)(new_cluster & 0xFFFF);
     new_dir.DIR_FstClusHI = (uint16_t)((new_cluster >> 16) & 0xFFFF);
 
@@ -1323,7 +1391,7 @@ int mkdir(const char *name, Directory *parent, FILE *disk)
     buffer[1].DIR_FstClusLO = parent->DIR_FstClusLO;
     buffer[1].DIR_FstClusHI = parent->DIR_FstClusHI;
 
-    fseek(disk, cluster_to_offset(new_cluster), SEEK_SET);
+    fseek(disk, cluster_to_offset(new_cluster), SEEK_SET); // Corrigido
     fwrite(buffer, cluster_size, 1, disk);
     free(buffer);
 
@@ -1639,11 +1707,30 @@ int main(int argc, char *argv[])
                 printf("Diretório atual: %s\n", current_path);
             }
 
-            // attr <nome>
+            // Verifica se o comando é "attr <nome>"
             else if (verify_attr_command(comando) == 0)
             {
-                char *name = comando + 5;
-                dir_attr(name, disk);
+                // Extrai o nome do arquivo ou diretório
+                char *name = comando + 5; // Pula "attr " para obter o nome
+
+                // Remove espaços em branco no início e no final do nome (se houver)
+                while (*name == ' ')
+                    name++; // Remove espaços no início
+                char *end = name + strlen(name) - 1;
+                while (end > name && *end == ' ')
+                    end--;         // Remove espaços no final
+                *(end + 1) = '\0'; // Termina a string corretamente
+
+                // Verifica se o nome não está vazio
+                if (strlen(name) == 0)
+                {
+                    printf("Erro: Nome do arquivo ou diretório não especificado.\n");
+                }
+                else
+                {
+                    // Chama a função dir_attr com o diretório atual
+                    dir_attr(name, disk, &actual_dir); // Passa o endereço de actual_dir
+                }
             }
             // ls
             else if (strcmp(comando, "ls") == 0)
