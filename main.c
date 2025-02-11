@@ -8,6 +8,7 @@
 #include <wchar.h>
 #include <locale.h>
 #include <time.h>
+#include <stdbool.h>
 
 #define ATTR_LONG_NAME 0x0F
 
@@ -561,33 +562,74 @@ int read_fat(FILE *disk)
     fread(g_fat, fat_size, 1, disk);
     return 0;
 }
+// Verifica se um número de cluster é válido
+bool is_cluster_valid(uint32_t cluster)
+{
+    // Cluster 0 e 1 são reservados
+    if (cluster < 2)
+    {
+        return false;
+    }
 
+    // Calcula o número máximo de clusters
+    uint32_t data_start_sector = g_bpb.BPB_RsvdSecCnt + (g_bpb.BPB_NumFATs * g_bpb.BPB_FATSz32);
+    uint32_t total_data_sectors = g_bpb.BPB_TotSec32 - data_start_sector;
+    uint32_t max_clusters = total_data_sectors / g_bpb.BPB_SecPerClus;
+
+    // Verifica se o cluster está dentro do limite
+    if (cluster >= max_clusters + 2)
+    {
+        return false;
+    }
+
+    return true;
+}
 // Lê um cluster do disco para o comando "cluster"
 int read_cluster(FILE *disk, uint32_t cluster)
 {
+    // Verifica se o cluster é válido
+    if (!is_cluster_valid(cluster))
+    {
+        printf("Erro: Número de cluster inválido.\n");
+        return -1;
+    }
+
+    // Calcula o offset do cluster
     uint32_t data_start = (g_bpb.BPB_RsvdSecCnt + g_bpb.BPB_NumFATs * g_bpb.BPB_FATSz32) * g_bpb.BPB_BytsPerSec;
     uint32_t cluster_size = g_bpb.BPB_SecPerClus * g_bpb.BPB_BytsPerSec;
     uint32_t offset = data_start + (cluster - 2) * cluster_size;
 
+    // Aloca um buffer para armazenar o conteúdo do cluster
     uint8_t *buffer = malloc(cluster_size);
+    if (!buffer)
+    {
+        printf("Erro: Falha ao alocar memória.\n");
+        return -1;
+    }
+
+    // Lê o cluster do disco
     fseek(disk, offset, SEEK_SET);
     fread(buffer, cluster_size, 1, disk);
 
+    // Exibe o conteúdo do cluster em formato hexadecimal
     printf("Cluster %d:\n", cluster);
     for (uint32_t i = 0; i < cluster_size; i++)
     {
-        uint8_t byte = buffer[i];
-        printf("%c ", byte);
-        if (i % 16 == 15)
+        // Exibe cada byte em formato hexadecimal
+        printf("%02X ", buffer[i]);
+
+        // Quebra a linha a cada 16 bytes para melhorar a legibilidade
+        if ((i + 1) % 16 == 0)
         {
             printf("\n");
         }
     }
     printf("\n");
+
+    // Libera o buffer
     free(buffer);
     return 0;
 }
-
 void convert_to_8dot3(const char *input, char *output)
 {
     memset(output, ' ', 11);
@@ -1678,8 +1720,17 @@ int main(int argc, char *argv[])
             // cluster <num>
             else if (verify_cluster_command(comando) == 0)
             {
-                uint8_t num = atoi(comando + 8);
-                read_cluster(disk, num);
+                uint32_t num = (uint32_t)atoi(comando + 8); // Usa uint32_t para armazenar o número do cluster
+
+                // Verifica se o cluster é válido
+                if (is_cluster_valid(num))
+                {
+                    read_cluster(disk, num);
+                }
+                else
+                {
+                    printf("Erro: Número de cluster inválido.\n");
+                }
             }
             // MKDIR <nome>
             else if (strncmp(comando, "mkdir", 5) == 0)
