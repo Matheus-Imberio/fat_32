@@ -534,309 +534,320 @@ int touch(const char *name, FILE *disk, Directory *actual_cluster)
     printf("Erro: Não há espaço disponível no diretório.\n");
     return -1;
 }
-uint32_t get_directory_offset(uint32_t first_cluster)
+int find_file_in_directory(FILE *disk, Directory *dir, const char *file_name, Directory *file_entry)
 {
-    uint32_t data_start = (g_bpb.BPB_RsvdSecCnt + g_bpb.BPB_NumFATs * g_bpb.BPB_FATSz32) * g_bpb.BPB_BytsPerSec;
-    uint32_t cluster_size = g_bpb.BPB_SecPerClus * g_bpb.BPB_BytsPerSec;
-    return data_start + (first_cluster - 2) * cluster_size;
-}
+    uint32_t cluster = dir->DIR_FstClusLO;
+    uint32_t offset = cluster_to_offset(cluster);
+    fseek(disk, offset, SEEK_SET);
 
-uint32_t find_directory(FILE *disk, const char *target_dir_name)
-{
-    if (strcmp(target_dir_name, "/") == 0)
-    {
-        // Diretório raiz
-        return g_bpb.BPB_RootClus;
-    }
-
-    char formatted_target_dir_name[12] = {0};
-    convert_to_8dot3(target_dir_name, formatted_target_dir_name);
-
-    uint32_t cluster_size = g_bpb.BPB_SecPerClus * g_bpb.BPB_BytsPerSec;
-
-    Directory *entries = malloc(cluster_size);
+    Directory *entries = malloc(g_bpb.BPB_SecPerClus * g_bpb.BPB_BytsPerSec);
     if (!entries)
     {
-        fprintf(stderr, "Erro ao alocar memória para busca de diretório.\n");
-        return 0;
+        fprintf(stderr, "Erro ao alocar memória para leitura do diretório.\n");
+        return -1;
     }
 
-    uint32_t current_cluster = g_bpb.BPB_RootClus;
-    while (current_cluster != 0xFFFFFFFF)
-    {
-        uint32_t offset = get_directory_offset(current_cluster);
+    fread(entries, sizeof(Directory), g_bpb.BPB_SecPerClus * g_bpb.BPB_BytsPerSec / sizeof(Directory), disk);
 
-        if (fseek(disk, offset, SEEK_SET) != 0 || fread(entries, cluster_size, 1, disk) != 1)
+    char formatted_name[12];
+    convert_to_8dot3(file_name, formatted_name);
+
+    for (size_t i = 0; i < g_bpb.BPB_SecPerClus * g_bpb.BPB_BytsPerSec / sizeof(Directory); i++)
+    {
+        if (entries[i].DIR_Name[0] == 0 || entries[i].DIR_Name[0] == 0xE5)
         {
-            fprintf(stderr, "Erro ao acessar o cluster do diretório.\n");
+            continue;
+        }
+
+        if (strncmp((const char *)entries[i].DIR_Name, formatted_name, 11) == 0)
+        {
+            *file_entry = entries[i]; // Retorna a entrada do arquivo
             free(entries);
             return 0;
         }
+    }
 
-        for (uint32_t i = 0; i < cluster_size / sizeof(Directory); i++)
+    free(entries);
+    return -1; // Arquivo não encontrado
+}
+int cp(const char *source_path, const char *target_path, FILE *disk, Directory *actual_dir)
+{
+    FILE *source_file = NULL;
+    uint8_t buffer[4096];
+    size_t bytes_read, bytes_written;
+
+    // Verifica se o caminho de origem é dentro da imagem (começa com "img/")
+    if (strncmp(source_path, "img/", 4) == 0)
+    {
+        // Remove o prefixo "img/" para operar dentro da imagem
+        const char *internal_source = source_path + 4;
+
+        // Busca o arquivo de origem no diretório atual ou raiz
+        Directory source_entry;
+        if (find_file_in_directory(disk, actual_dir, internal_source, &source_entry) != 0)
         {
-            if (entries[i].DIR_Name[0] == 0)
-                break; // Diretório vazio
-            if (entries[i].DIR_Name[0] == 0xE5)
-                continue; // Entrada excluída
+            fprintf(stderr, "Erro: Arquivo de origem '%s' não encontrado na imagem.\n", source_path);
+            return -1;
+        }
 
-            char entry_name[12] = {0};
-            strncpy(entry_name, (const char *)entries[i].DIR_Name, 11);
+        // Verifica se o destino é dentro da imagem (começa com "img/")
+        if (strncmp(target_path, "img/", 4) == 0)
+        {
+            // Remove o prefixo "img/" para operar dentro da imagem
+            const char *internal_target = target_path + 4;
 
-            if (strncmp(entry_name, formatted_target_dir_name, 11) == 0 && (entries[i].DIR_Attr & 0x10))
+            // Verifica se o arquivo de destino já existe
+            Directory target_entry;
+            if (find_file_in_directory(disk, actual_dir, internal_target, &target_entry) == 0)
             {
-                uint32_t target_cluster = entries[i].DIR_FstClusLO;
-                free(entries);
-                return target_cluster; // Retorna o cluster inicial do diretório
+                fprintf(stderr, "Erro: O arquivo de destino '%s' já existe na imagem.\n", target_path);
+                return -1;
+            }
+
+            // Cria o arquivo de destino na imagem
+            if (touch(internal_target, disk, actual_dir) != 0)
+            {
+                fprintf(stderr, "Erro: Falha ao criar o arquivo de destino '%s'.\n", target_path);
+                return -1;
+            }
+
+            // Busca o arquivo de destino criado
+            if (find_file_in_directory(disk, actual_dir, internal_target, &target_entry) != 0)
+            {
+                fprintf(stderr, "Erro: Arquivo de destino '%s' não encontrado na imagem.\n", target_path);
+                return -1;
+            }
+
+            // Copia os dados do arquivo de origem para o destino
+            uint32_t source_cluster = source_entry.DIR_FstClusLO | (source_entry.DIR_FstClusHI << 16);
+            uint32_t target_cluster = target_entry.DIR_FstClusLO | (target_entry.DIR_FstClusHI << 16);
+            uint32_t file_size = source_entry.DIR_FileSize;
+            uint32_t bytes_remaining = file_size;
+
+            while (bytes_remaining > 0)
+            {
+                uint32_t read_size = (bytes_remaining > sizeof(buffer)) ? sizeof(buffer) : bytes_remaining;
+                fseek(disk, cluster_to_offset(source_cluster), SEEK_SET);
+                bytes_read = fread(buffer, 1, read_size, disk);
+
+                if (bytes_read == 0)
+                {
+                    fprintf(stderr, "Erro: Falha ao ler o arquivo de origem '%s'.\n", source_path);
+                    return -1;
+                }
+
+                fseek(disk, cluster_to_offset(target_cluster), SEEK_SET);
+                bytes_written = fwrite(buffer, 1, bytes_read, disk);
+
+                if (bytes_written != bytes_read)
+                {
+                    fprintf(stderr, "Erro: Falha ao escrever no arquivo de destino '%s'.\n", target_path);
+                    return -1;
+                }
+
+                bytes_remaining -= bytes_read;
+                source_cluster = g_fat[source_cluster * 4] & 0x0FFFFFFF;
+
+                // Aloca um novo cluster para o destino, se necessário
+                if (bytes_remaining > 0)
+                {
+                    uint32_t new_cluster;
+                    if (allocate_cluster(disk, &new_cluster) == -1)
+                    {
+                        fprintf(stderr, "Erro: Sem espaço para alocar um novo cluster.\n");
+                        return -1;
+                    }
+
+                    g_fat[target_cluster * 4] = new_cluster;
+                    target_cluster = new_cluster;
+                }
+            }
+
+            // Atualiza o tamanho do arquivo de destino
+            target_entry.DIR_FileSize = file_size;
+            uint32_t cluster = actual_dir->DIR_FstClusLO;
+            uint32_t offset = cluster_to_offset(cluster);
+            fseek(disk, offset, SEEK_SET);
+            fwrite(&target_entry, sizeof(Directory), 1, disk);
+
+            printf("Arquivo '%s' copiado para '%s' com sucesso.\n", source_path, target_path);
+            return 0;
+        }
+        else
+        {
+            // Copia o arquivo da imagem para o sistema de arquivos do host
+            source_file = fopen(target_path, "wb");
+            if (!source_file)
+            {
+                fprintf(stderr, "Erro: Não foi possível abrir o arquivo de destino '%s'.\n", target_path);
+                return -1;
+            }
+
+            // Copia os dados do arquivo da imagem para o arquivo no host
+            uint32_t file_cluster = source_entry.DIR_FstClusLO | (source_entry.DIR_FstClusHI << 16);
+            uint32_t file_size = source_entry.DIR_FileSize;
+            uint32_t bytes_remaining = file_size;
+
+            while (bytes_remaining > 0)
+            {
+                uint32_t read_size = (bytes_remaining > sizeof(buffer)) ? sizeof(buffer) : bytes_remaining;
+                fseek(disk, cluster_to_offset(file_cluster), SEEK_SET);
+                bytes_read = fread(buffer, 1, read_size, disk);
+
+                if (bytes_read == 0)
+                {
+                    fprintf(stderr, "Erro: Falha ao ler o arquivo de origem '%s'.\n", source_path);
+                    fclose(source_file);
+                    return -1;
+                }
+
+                bytes_written = fwrite(buffer, 1, bytes_read, source_file);
+                if (bytes_written != bytes_read)
+                {
+                    fprintf(stderr, "Erro: Falha ao escrever no arquivo de destino '%s'.\n", target_path);
+                    fclose(source_file);
+                    return -1;
+                }
+
+                bytes_remaining -= bytes_read;
+                file_cluster = g_fat[file_cluster * 4] & 0x0FFFFFFF;
+
+                // Verifica se chegou ao fim do arquivo
+                if (file_cluster >= 0x0FFFFFF8)
+                {
+                    break;
+                }
+            }
+
+            fclose(source_file);
+            printf("Arquivo '%s' copiado para '%s' com sucesso.\n", source_path, target_path);
+            return 0;
+        }
+    }
+    else
+    {
+        // Copia o arquivo do host para a imagem
+        source_file = fopen(source_path, "rb");
+        if (!source_file)
+        {
+            fprintf(stderr, "Erro: Não foi possível abrir o arquivo de origem '%s'.\n", source_path);
+            return -1;
+        }
+
+        // Verifica se o arquivo já existe no diretório
+        Directory file_entry;
+        if (find_file_in_directory(disk, actual_dir, target_path, &file_entry) == 0)
+        {
+            fprintf(stderr, "Erro: O arquivo '%s' já existe na imagem.\n", target_path);
+            fclose(source_file);
+            return -1;
+        }
+
+        // Cria o arquivo na imagem
+        if (touch(target_path, disk, actual_dir) != 0)
+        {
+            fprintf(stderr, "Erro: Falha ao criar o arquivo de destino '%s'.\n", target_path);
+            fclose(source_file);
+            return -1;
+        }
+
+        // Busca o arquivo criado na imagem
+        if (find_file_in_directory(disk, actual_dir, target_path, &file_entry) != 0)
+        {
+            fprintf(stderr, "Erro: Arquivo de destino '%s' não encontrado na imagem.\n", target_path);
+            fclose(source_file);
+            return -1;
+        }
+
+        // Copia os dados do arquivo do host para a imagem
+        uint32_t file_cluster = file_entry.DIR_FstClusLO | (file_entry.DIR_FstClusHI << 16);
+        uint32_t file_size = 0;
+        uint32_t bytes_remaining = 0;
+
+        while ((bytes_read = fread(buffer, 1, sizeof(buffer), source_file)) > 0)
+        {
+            fseek(disk, cluster_to_offset(file_cluster), SEEK_SET);
+            fwrite(buffer, 1, bytes_read, disk);
+
+            file_size += bytes_read;
+            bytes_remaining += bytes_read;
+
+            // Aloca um novo cluster se necessário
+            if (bytes_remaining >= g_bpb.BPB_SecPerClus * g_bpb.BPB_BytsPerSec)
+            {
+                uint32_t new_cluster;
+                if (allocate_cluster(disk, &new_cluster) == -1)
+                {
+                    fprintf(stderr, "Erro: Sem espaço para alocar um novo cluster.\n");
+                    fclose(source_file);
+                    return -1;
+                }
+
+                g_fat[file_cluster * 4] = new_cluster;
+                file_cluster = new_cluster;
+                bytes_remaining = 0;
             }
         }
 
-        current_cluster = 0xFFFFFFFF; // Caso simples: assume que não há encadeamento
-    }
+        // Atualiza o tamanho do arquivo na entrada do diretório
+        file_entry.DIR_FileSize = file_size;
+        uint32_t cluster = actual_dir->DIR_FstClusLO;
+        uint32_t offset = cluster_to_offset(cluster);
+        fseek(disk, offset, SEEK_SET);
+        fwrite(&file_entry, sizeof(Directory), 1, disk);
 
-    fprintf(stderr, "Diretório '%s' não encontrado.\n", target_dir_name);
-    free(entries);
-    return 0;
+        fclose(source_file);
+        printf("Arquivo '%s' copiado para '%s' com sucesso.\n", source_path, target_path);
+        return 0;
+    }
 }
-
-int mv(FILE *disk, Directory *dir, const char *source_name, const char *target_dir_name)
+int mv(const char *source_path, const char *target_path, FILE *disk, Directory *actual_dir)
 {
-    char formatted_source_name[12] = {0};
-    convert_to_8dot3(source_name, formatted_source_name);
-
-    uint32_t cluster_size = g_bpb.BPB_SecPerClus * g_bpb.BPB_BytsPerSec;
-
-    // Buscar o cluster inicial do diretório de origem
-    uint32_t offset = get_directory_offset(dir->DIR_FstClusLO);
-
-    // Ler o diretório de origem
-    Directory *entries = malloc(cluster_size);
-    if (!entries)
+    // Primeiro, copia o arquivo
+    if (cp(source_path, target_path, disk, actual_dir) != 0)
     {
-        fprintf(stderr, "Erro ao alocar memória para o diretório de origem.\n");
+        fprintf(stderr, "Erro: Falha ao copiar o arquivo '%s'.\n", source_path);
         return -1;
     }
 
-    if (fseek(disk, offset, SEEK_SET) != 0 || fread(entries, cluster_size, 1, disk) != 1)
-    {
-        fprintf(stderr, "Erro ao ler o diretório de origem.\n");
-        free(entries);
-        return -1;
-    }
-
-    int found_source = 0;
+    // Depois, remove o arquivo de origem
     Directory file_entry;
-
-    // Encontrar o arquivo de origem no diretório atual
-    for (uint32_t i = 0; i < cluster_size / sizeof(Directory); i++)
+    if (source_path[0] == '/')
     {
-        if (entries[i].DIR_Name[0] == 0)
-            break; // Fim do diretório
-        if (entries[i].DIR_Name[0] == 0xE5)
-            continue; // Entrada excluída
-
-        if (strncmp((const char *)entries[i].DIR_Name, formatted_source_name, 11) == 0)
+        // Remove o arquivo de origem a partir do diretório raiz
+        if (find_file_in_directory(disk, &g_RootDirectory, source_path + 1, &file_entry) != 0)
         {
-            file_entry = entries[i];
-            entries[i].DIR_Name[0] = 0xE5; // Marcar como excluído
-            found_source = 1;
-            break;
+            fprintf(stderr, "Erro: Arquivo de origem '%s' não encontrado na imagem.\n", source_path);
+            return -1;
+        }
+    }
+    else
+    {
+        // Remove o arquivo de origem a partir do diretório atual
+        if (find_file_in_directory(disk, actual_dir, source_path, &file_entry) != 0)
+        {
+            fprintf(stderr, "Erro: Arquivo de origem '%s' não encontrado no diretório atual.\n", source_path);
+            return -1;
         }
     }
 
-    if (!found_source)
+    // Marca a entrada como excluída
+    file_entry.DIR_Name[0] = 0xE5;
+    uint32_t cluster = actual_dir->DIR_FstClusLO;
+    uint32_t offset = cluster_to_offset(cluster);
+    fseek(disk, offset, SEEK_SET);
+    fwrite(&file_entry, sizeof(Directory), 1, disk);
+
+    // Libera os clusters na FAT
+    uint32_t file_cluster = file_entry.DIR_FstClusLO | (file_entry.DIR_FstClusHI << 16);
+    while (file_cluster < 0x0FFFFFF8)
     {
-        fprintf(stderr, "Arquivo '%s' não encontrado no diretório de origem.\n", source_name);
-        free(entries);
-        return -1;
+        uint32_t next_cluster = g_fat[file_cluster * 4] & 0x0FFFFFFF;
+        g_fat[file_cluster * 4] = 0x00000000; // Marca como livre
+        file_cluster = next_cluster;
     }
 
-    // Localizar o cluster inicial do diretório de destino
-    uint32_t target_cluster = find_directory(disk, target_dir_name);
-    if (target_cluster == 0)
-    {
-        fprintf(stderr, "Diretório de destino '%s' não encontrado.\n", target_dir_name);
-        free(entries);
-        return -1;
-    }
-
-    uint32_t target_offset = get_directory_offset(target_cluster);
-
-    // Ler o diretório de destino
-    Directory *target_entries = malloc(cluster_size);
-    if (!target_entries)
-    {
-        fprintf(stderr, "Erro ao alocar memória para o diretório de destino.\n");
-        free(entries);
-        return -1;
-    }
-
-    if (fseek(disk, target_offset, SEEK_SET) != 0 || fread(target_entries, cluster_size, 1, disk) != 1)
-    {
-        fprintf(stderr, "Erro ao ler o diretório de destino.\n");
-        free(entries);
-        free(target_entries);
-        return -1;
-    }
-
-    // Procurar espaço livre no diretório de destino
-    int added = 0;
-    for (uint32_t i = 0; i < cluster_size / sizeof(Directory); i++)
-    {
-        if (target_entries[i].DIR_Name[0] == 0)
-        {
-            // Encontrou espaço livre, copia o arquivo para o diretório de destino
-            memcpy(&target_entries[i], &file_entry, sizeof(Directory));
-            added = 1;
-            break;
-        }
-    }
-
-    if (!added)
-    {
-        fprintf(stderr, "Não há espaço suficiente no diretório de destino '%s'.\n", target_dir_name);
-        free(entries);
-        free(target_entries);
-        return -1;
-    }
-
-    // Escrever as alterações no diretório de destino
-    if (fseek(disk, target_offset, SEEK_SET) != 0 || fwrite(target_entries, cluster_size, 1, disk) != 1)
-    {
-        fprintf(stderr, "Erro ao salvar alterações no diretório de destino.\n");
-        free(entries);
-        free(target_entries);
-        return -1;
-    }
-
-    // Escrever as alterações no diretório de origem
-    if (fseek(disk, offset, SEEK_SET) != 0 || fwrite(entries, cluster_size, 1, disk) != 1)
-    {
-        fprintf(stderr, "Erro ao salvar alterações no diretório de origem.\n");
-        free(entries);
-        free(target_entries);
-        return -1;
-    }
-
-    printf("Arquivo '%s' movido para '%s' com sucesso.\n", source_name, target_dir_name);
-
-    free(entries);
-    free(target_entries);
-    return 0;
-}
-int cp(FILE *disk, Directory *dir, const char *source_name, const char *target_dir_name)
-{
-    char formatted_source_name[12] = {0};
-    convert_to_8dot3(source_name, formatted_source_name);
-
-    uint32_t cluster_size = g_bpb.BPB_SecPerClus * g_bpb.BPB_BytsPerSec;
-
-    // Buscar o cluster inicial do diretório de origem
-    uint32_t offset = get_directory_offset(dir->DIR_FstClusLO);
-
-    // Ler o diretório de origem
-    Directory *entries = malloc(cluster_size);
-    if (!entries)
-    {
-        fprintf(stderr, "Erro ao alocar memória para o diretório de origem.\n");
-        return -1;
-    }
-
-    if (fseek(disk, offset, SEEK_SET) != 0 || fread(entries, cluster_size, 1, disk) != 1)
-    {
-        fprintf(stderr, "Erro ao ler o diretório de origem.\n");
-        free(entries);
-        return -1;
-    }
-
-    int found_source = 0;
-    Directory file_entry;
-
-    // Encontrar o arquivo de origem no diretório atual
-    for (uint32_t i = 0; i < cluster_size / sizeof(Directory); i++)
-    {
-        if (entries[i].DIR_Name[0] == 0)
-            break; // Fim do diretório
-        if (entries[i].DIR_Name[0] == 0xE5)
-            continue; // Entrada excluída
-
-        if (strncmp((const char *)entries[i].DIR_Name, formatted_source_name, 11) == 0)
-        {
-            file_entry = entries[i]; // Copiar a entrada do arquivo
-            found_source = 1;
-            break;
-        }
-    }
-
-    if (!found_source)
-    {
-        fprintf(stderr, "Arquivo '%s' não encontrado no diretório de origem.\n", source_name);
-        free(entries);
-        return -1;
-    }
-
-    // Localizar o cluster inicial do diretório de destino
-    uint32_t target_cluster = find_directory(disk, target_dir_name);
-    if (target_cluster == 0)
-    {
-        fprintf(stderr, "Diretório de destino '%s' não encontrado.\n", target_dir_name);
-        free(entries);
-        return -1;
-    }
-
-    uint32_t target_offset = get_directory_offset(target_cluster);
-
-    // Ler o diretório de destino
-    Directory *target_entries = malloc(cluster_size);
-    if (!target_entries)
-    {
-        fprintf(stderr, "Erro ao alocar memória para o diretório de destino.\n");
-        free(entries);
-        return -1;
-    }
-
-    if (fseek(disk, target_offset, SEEK_SET) != 0 || fread(target_entries, cluster_size, 1, disk) != 1)
-    {
-        fprintf(stderr, "Erro ao ler o diretório de destino.\n");
-        free(entries);
-        free(target_entries);
-        return -1;
-    }
-
-    // Procurar espaço livre no diretório de destino
-    int added = 0;
-    for (uint32_t i = 0; i < cluster_size / sizeof(Directory); i++)
-    {
-        if (target_entries[i].DIR_Name[0] == 0)
-        {
-            // Encontrou espaço livre, copia o arquivo para o diretório de destino
-            memcpy(&target_entries[i], &file_entry, sizeof(Directory));
-            added = 1;
-            break;
-        }
-    }
-
-    if (!added)
-    {
-        fprintf(stderr, "Não há espaço suficiente no diretório de destino '%s'.\n", target_dir_name);
-        free(entries);
-        free(target_entries);
-        return -1;
-    }
-
-    // Escrever as alterações no diretório de destino
-    if (fseek(disk, target_offset, SEEK_SET) != 0 || fwrite(target_entries, cluster_size, 1, disk) != 1)
-    {
-        fprintf(stderr, "Erro ao salvar alterações no diretório de destino.\n");
-        free(entries);
-        free(target_entries);
-        return -1;
-    }
-
-    printf("Arquivo '%s' copiado para '%s' com sucesso.\n", source_name, target_dir_name);
-
-    free(entries);
-    free(target_entries);
+    printf("Arquivo '%s' movido para '%s' com sucesso.\n", source_path, target_path);
     return 0;
 }
 int rename_file(FILE *disk, Directory *dir, const char *file_name, const char *new_name)
@@ -1441,37 +1452,85 @@ int main(int argc, char *argv[])
                     }
                 }
             }
-            // mv<source><target>
+            // mv <source> <target>
             else if (strncmp(comando, "mv", 2) == 0)
             {
                 char source[100], target[100];
                 if (sscanf(comando + 3, "%s %s", source, target) == 2)
                 {
-                    if (mv(disk, &actual_dir, source, target) != 0)
+                    // Verifica se o destino é um diretório dentro da imagem (começa com "img/")
+                    if (strncmp(target, "img/", 4) == 0)
                     {
-                        printf("Erro ao mover '%s' para '%s'.\n", source, target);
+                        // Remove o prefixo "img/" para operar dentro da imagem
+                        const char *internal_target = target + 4;
+
+                        // Move o arquivo dentro da imagem
+                        if (mv(source, internal_target, disk, &actual_dir) != 0)
+                        {
+                            printf("Erro ao mover '%s' para '%s'.\n", source, target);
+                        }
+                        else
+                        {
+                            printf("Arquivo '%s' movido para '%s' com sucesso.\n", source, target);
+                        }
+                    }
+                    else
+                    {
+                        // Move o arquivo para o sistema de arquivos do host
+                        if (mv(source, target, disk, &actual_dir) != 0)
+                        {
+                            printf("Erro ao mover '%s' para '%s'.\n", source, target);
+                        }
+                        else
+                        {
+                            printf("Arquivo '%s' movido para '%s' com sucesso.\n", source, target);
+                        }
                     }
                 }
                 else
                 {
-                    printf("Uso: mv <caminho_origem> <diretório_destino>\n");
+                    printf("Uso: mv <caminho_origem> <caminho_destino>\n");
                 }
             }
             // cp <source><target>
+            // cp <source> <target>
             else if (strncmp(comando, "cp", 2) == 0)
             {
                 char source[100], target[100];
                 if (sscanf(comando + 3, "%s %s", source, target) == 2)
                 {
-                    // Chama a função cp para copiar o arquivo
-                    if (cp(disk, &actual_dir, source, target) != 0)
+                    // Verifica se o destino é um diretório dentro da imagem (começa com "img/")
+                    if (strncmp(target, "img/", 4) == 0)
                     {
-                        printf("Erro ao copiar '%s' para '%s'.\n", source, target);
+                        // Remove o prefixo "img/" para operar dentro da imagem
+                        const char *internal_target = target + 4;
+
+                        // Copia o arquivo para dentro da imagem
+                        if (cp(source, internal_target, disk, &actual_dir) != 0)
+                        {
+                            printf("Erro ao copiar '%s' para '%s'.\n", source, target);
+                        }
+                        else
+                        {
+                            printf("Arquivo '%s' copiado para '%s' com sucesso.\n", source, target);
+                        }
+                    }
+                    else
+                    {
+                        // Copia o arquivo para o sistema de arquivos do host
+                        if (cp(source, target, disk, &actual_dir) != 0)
+                        {
+                            printf("Erro ao copiar '%s' para '%s'.\n", source, target);
+                        }
+                        else
+                        {
+                            printf("Arquivo '%s' copiado para '%s' com sucesso.\n", source, target);
+                        }
                     }
                 }
                 else
                 {
-                    printf("Uso: cp <arquivo_origem> <diretório_destino>\n");
+                    printf("Uso: cp <arquivo_origem> <caminho_destino>\n");
                 }
             }
             // rename <file> <newfilename>
